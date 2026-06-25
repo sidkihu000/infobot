@@ -13,7 +13,7 @@ import requests
 import subprocess
 
 # ==================== CONFIG ====================
-BOT_TOKEN = "6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU"
+BOT_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"
 ADMIN_IDS = [2119464081]
 
 COOKIES_FILE = "cookies.txt"   # YouTube login cookies
@@ -106,20 +106,22 @@ def is_limited(user_id):
     user_last_request[user_id] = now
     return False
 
-# ==================== AUDIO DOWNLOAD (FIXED FORMAT) ====================
+# ==================== AUDIO DOWNLOAD (MP3 EXTRACTION) ====================
 def download_audio(url):
     with tempfile.TemporaryDirectory() as tmpdir:
         outtmpl = os.path.join(tmpdir, '%(title)s.%(ext)s')
         cmd = [
             'yt-dlp',
-            '-f', 'bestaudio',          # Removed [ext=m4a] to avoid missing format error
-            '--extract-audio',
-            '--audio-format', 'm4a',
+            '-f', 'bestaudio',
+            '-x',
+            '--audio-format', 'mp3',
+            '--audio-quality', '0',
             '--output', outtmpl,
             '--print', 'title',
             '--print', 'uploader',
             '--print', 'duration',
             '--no-playlist',
+            '--force-overwrites',
             url
         ]
         if os.path.isfile(COOKIES_FILE):
@@ -131,16 +133,16 @@ def download_audio(url):
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            error_msg = result.stderr.strip().split('\n')[-1] if result.stderr else "Unknown yt-dlp error"
+            error_msg = result.stderr.strip().split('\n')[-1] if result.stderr else "yt-dlp error"
             raise Exception(f"yt-dlp failed: {error_msg}")
         lines = result.stdout.strip().split('\n')
         title = lines[-3] if len(lines) >= 3 else "Unknown"
         uploader = lines[-2] if len(lines) >= 2 else "Unknown"
         duration = int(lines[-1]) if lines[-1].isdigit() else 0
         files = os.listdir(tmpdir)
-        audio_file = next((f for f in files if f.endswith('.m4a')), None)
+        audio_file = next((f for f in files if f.endswith('.mp3')), None)
         if not audio_file:
-            raise Exception("No audio file created")
+            raise Exception("No mp3 file created")
         with open(os.path.join(tmpdir, audio_file), 'rb') as f:
             audio_data = f.read()
         return audio_data, title, uploader, duration
@@ -217,7 +219,7 @@ def send_audio(chat_id, url, reply_to=None):
     thumb_io = create_glass_thumbnail(thumb_url) if thumb_url else None
 
     audio_file = BytesIO(audio_data)
-    audio_file.name = f"{title}.m4a"
+    audio_file.name = f"{title}.mp3"
     msg = bot.send_audio(
         chat_id,
         audio_file,
