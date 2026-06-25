@@ -2,3 +2,4 @@ pyTelegramBotAPI
 yt-dlp
 Pillow
 requests
+google-generativeai
