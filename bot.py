@@ -301,7 +301,7 @@ def send_welcome(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn_info = types.InlineKeyboardButton("ℹ️ Bot Info", callback_data='bot_info')
     btn_help = types.InlineKeyboardButton("❓ Help", callback_data='help')
-    btn_admin = types.InlineKeyboardButton("👤 Contact Admin", url='https://t.me/YourAdminUsername')
+    btn_admin = types.InlineKeyboardButton("👤 Contact Admin", url='https://t.me/Xricx0')
     btn_website = types.InlineKeyboardButton("🌐 Website", url='https://your-website.com')
     btn_search = types.InlineKeyboardButton("🔍 Search User", callback_data='search_user')
     btn_list = types.InlineKeyboardButton("📋 List All Users", callback_data='list_users')
