@@ -14,8 +14,8 @@ import requests
 import subprocess
 
 # ==================== CONFIG ====================
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"          # Replace with your bot token
-ADMIN_IDS = [123456789]                    # Replace with admin user IDs
+BOT_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"          # Replace with your bot token
+ADMIN_IDS = [2119464081]                    # Replace with admin user IDs
 
 # ==================== LOGGING ====================
 logging.basicConfig(
