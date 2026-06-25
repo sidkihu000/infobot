@@ -24,8 +24,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== ENVIRONMENT VARIABLES ====================
 load_dotenv()
-API_TOKEN = os.getenv('8637135798:AAEdTzCnL3fn1keuLzLxQN0BUULXlTMicVY')
-API_TOKEN = os.getenv('8637135798:AAEdTzCnL3fn1keuLzLxQN0BUULXlTMicVY')
+API_TOKEN = os.getenv('8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A')
 if not API_TOKEN:
     logger.critical("8637135798:AAEdTzCnL3fn1keuLzLxQN0BUULXlTMicVY")
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
