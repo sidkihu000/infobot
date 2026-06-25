@@ -17,7 +17,7 @@ BOT_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"          # Replace 
 ADMIN_IDS = [2119464081]                    # Replace with admin user IDs
 
 # Gemini API (optional, set via env or .env)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAXERqkAEErXF7-4qSlap6tO9QSSmJmpf0")
 USE_AI = False
 if GEMINI_API_KEY:
     import google.generativeai as genai
