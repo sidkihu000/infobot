@@ -1,5 +1,5 @@
 pyTelegramBotAPI
-yt-dlp
+yt-dlp>=2025.06.16
 Pillow
 requests
 google-generativeai
