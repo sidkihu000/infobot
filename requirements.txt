@@ -1,6 +1,1 @@
-pyTelegramBotAPI
-yt-dlp
-Pillow
-requests
-google-generativeai
-python-dotenv
+pip install pyTelegramBotAPI yt-dlp Pillow requests
