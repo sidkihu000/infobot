@@ -12,30 +12,36 @@ from PIL import Image, ImageFilter, ImageDraw
 import requests
 import subprocess
 
-# ==================== CONFIG ====================
-BOT_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"          # Replace with your bot token
-ADMIN_IDS = [2119464081]                    # Replace with admin user IDs
-
-# Gemini API (optional, set via env or .env)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAXERqkAEErXF7-4qSlap6tO9QSSmJmpf0")
-USE_AI = False
-if GEMINI_API_KEY:
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
-    # Use fast model for quick replies
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    USE_AI = True
-    logger.info("Gemini AI enabled.")
-else:
-    logger.info("Gemini API key not set – using simple responses.")
-
-# ==================== LOGGING ====================
+# ==================== LOGGING SETUP (MUST BE FIRST) ====================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.FileHandler('musicbot.log'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+# ==================== CONFIG ====================
+BOT_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"          # Replace with your actual bot token
+ADMIN_IDS = [2119464081]                    # Replace with admin user IDs
+
+# --- Gemini API key (hardcoded – move to env for production) ---
+GEMINI_API_KEY = "AIzaSyAXERqkAEErXF7-4qSlap6tO9QSSmJmpf0"
+
+# Try to import Gemini SDK (if not installed, AI will be disabled)
+USE_AI = False
+if GEMINI_API_KEY:
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        # Use fast model for quick replies
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        USE_AI = True
+        logger.info("Gemini AI enabled.")
+    except ImportError:
+        logger.warning("google-generativeai not installed – AI disabled.")
+        USE_AI = False
+else:
+    logger.info("No Gemini API key provided – using simple replies.")
 
 # ==================== BOT INIT ====================
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=4)
@@ -98,7 +104,6 @@ def is_limited(user_id):
 
 # ==================== AUDIO HELPERS ====================
 def download_audio(url):
-    """Download best audio from YouTube URL, return bytes and metadata."""
     with tempfile.TemporaryDirectory() as tmpdir:
         outtmpl = os.path.join(tmpdir, '%(title)s.%(ext)s')
         cmd = [
@@ -128,7 +133,6 @@ def download_audio(url):
         return audio_data, title, uploader, duration
 
 def create_glass_thumbnail(thumb_url):
-    """Download thumbnail, apply glass-morphism effect, return BytesIO."""
     try:
         resp = requests.get(thumb_url, timeout=5)
         img = Image.open(BytesIO(resp.content)).convert('RGB')
@@ -148,7 +152,6 @@ def create_glass_thumbnail(thumb_url):
 
 # ==================== SONG SEARCH & SEND ====================
 def search_songs(query, limit=5):
-    """Return list of dicts with title, uploader, url, duration, thumbnail."""
     cmd = ['yt-dlp', f'ytsearch{limit}:{query}', '--flat-playlist', '--dump-json', '--no-warnings']
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
@@ -175,7 +178,6 @@ def search_songs(query, limit=5):
         return []
 
 def send_audio(chat_id, url, reply_to=None):
-    """Download audio from URL and send to chat with glass thumbnail."""
     cached = get_cached_file(url)
     if cached:
         file_id, title, performer, duration = cached
@@ -183,7 +185,7 @@ def send_audio(chat_id, url, reply_to=None):
             bot.send_audio(chat_id, file_id, caption=f"🎵 {title} - {performer}", reply_to_message_id=reply_to)
             return
         except:
-            pass  # re‑download if file id expired
+            pass
 
     try:
         audio_data, title, uploader, duration = download_audio(url)
@@ -213,14 +215,13 @@ def send_audio(chat_id, url, reply_to=None):
 
 # ==================== AI CHAT (Gemini) ====================
 def ai_chat(user_name, user_message):
-    """Generate a conversational reply using Gemini, keeping context small."""
     if not USE_AI:
-        return None  # fallback to simple rules
+        return None
     prompt = f"""You are a friendly Hindi/English music assistant bot.
 User name: {user_name}
 User says: {user_message}
 Reply naturally in Hinglish or English, and keep it short.
-If the user asks for a song or music, say something like "Main aapke liye gaana dhundh raha hoon!".
+If the user asks for a song, say something like "Main aapke liye gaana dhundh raha hoon!".
 Now reply:"""
     try:
         response = model.generate_content(prompt)
@@ -230,17 +231,15 @@ Now reply:"""
         return None
 
 def simple_reply(user_name, text):
-    """Fallback rule-based replies when AI is disabled."""
     text_lower = text.lower()
     if any(kw in text_lower for kw in ['song', 'gaana', 'gana', 'play', 'music', 'geet']):
-        # Extract possible song name after keywords
         song = re.sub(r'(play|search|song|gaana|gana|music|geet)', '', text, flags=re.IGNORECASE).strip()
         if song:
             return f"🎵 Main aapke liye **{song}** dhundh raha hoon !!"
         return "🎵 Aapko kaunsa gaana chahiye?"
     return f"Hello {user_name}, main aapki kya madad kar sakta hoon? 🎶"
 
-# ==================== INLINE QUERIES (for fast search) ====================
+# ==================== INLINE QUERIES ====================
 @bot.inline_handler(lambda query: len(query.query) > 0)
 def inline_search(inline_query):
     if is_limited(inline_query.from_user.id):
@@ -273,12 +272,10 @@ def chosen_inline(chosen_result):
 @bot.message_handler(commands=['start'])
 def start(message):
     first_name = message.from_user.first_name
-    # Send admin video frame (if set)
     video_id = get_setting('video_file_id')
     if video_id:
         bot.send_video(message.chat.id, video_id, caption="🎬 Welcome to Music Bot!")
 
-    # AI or simple greeting
     greeting = ai_chat(first_name, "/start") if USE_AI else simple_reply(first_name, "hello")
     if not greeting:
         greeting = f"Hey {first_name}, how can I help you? 🎵"
@@ -305,7 +302,6 @@ def search_cmd(message):
         markup.add(types.InlineKeyboardButton(
             f"{entry['title'][:50]}", callback_data=f"play:{entry['url']}"
         ))
-    # Let AI respond conversationally as well
     reply_text = ai_chat(message.from_user.first_name, query) if USE_AI else simple_reply(message.from_user.first_name, query)
     if reply_text:
         bot.reply_to(message, reply_text)
@@ -320,12 +316,10 @@ def play_callback(call):
     bot.answer_callback_query(call.id, "Downloading...")
     send_audio(call.message.chat.id, url, reply_to=call.message.message_id)
 
-# ==================== NATURAL LANGUAGE SONG REQUEST ====================
 @bot.message_handler(func=lambda m: True, content_types=['text'])
 def handle_text(message):
-    # Skip commands
     if message.text.startswith('/'):
-        return  # commands are handled separately
+        return
 
     user_id = message.from_user.id
     if is_limited(user_id):
@@ -334,32 +328,26 @@ def handle_text(message):
     first_name = message.from_user.first_name
     text = message.text.strip()
 
-    # 1. Try AI reply
     ai_reply = ai_chat(first_name, text) if USE_AI else None
 
-    # 2. Detect if it's a song request
     song_keywords = ['song', 'gaana', 'gana', 'play', 'music', 'geet', 'bajao', 'suno']
     is_song_request = any(kw in text.lower() for kw in song_keywords)
 
     if is_song_request:
-        # Extract potential song name
         cleaned = re.sub('|'.join(song_keywords), '', text, flags=re.IGNORECASE).strip()
         if not cleaned:
-            cleaned = text  # fallback
-        # Reply with AI or fixed phrase
+            cleaned = text
         if ai_reply:
             reply = ai_reply
         else:
             reply = f"🎵 Main aapke liye **{cleaned}** dhundh raha hoon !!"
         bot.reply_to(message, reply, parse_mode='Markdown')
-        # Perform search and send the first result
         entries = search_songs(cleaned, 1)
         if entries:
             send_audio(message.chat.id, entries[0]['url'], reply_to=message.message_id)
         else:
             bot.reply_to(message, "❌ Koi result nahi mila.")
     else:
-        # Not a song request – just chat
         if ai_reply:
             bot.reply_to(message, ai_reply)
         else:
