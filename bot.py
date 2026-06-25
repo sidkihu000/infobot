@@ -13,8 +13,11 @@ import requests
 import subprocess
 
 # ==================== CONFIG ====================
-BOT_TOKEN = "6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU"
+BOT_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"
 ADMIN_IDS = [2119464081]
+
+# ==================== COOKIES FILE (for YouTube authentication) ====================
+COOKIES_FILE = "cookies.txt"   # Place this file in your project folder
 
 # ==================== LOGGING ====================
 logging.basicConfig(
@@ -24,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== GEMINI AI SETUP (NEW LIBRARY) ====================
+# ==================== GEMINI AI SETUP ====================
 GEMINI_API_KEY = "AIzaSyAXERqkAEErXF7-4qSlap6tO9QSSmJmpf0"
 USE_AI = False
 if GEMINI_API_KEY:
@@ -32,7 +35,7 @@ if GEMINI_API_KEY:
         from google import genai
         client = genai.Client(api_key=GEMINI_API_KEY)
         USE_AI = True
-        logger.info("Gemini AI enabled (google-genai).")
+        logger.info("Gemini AI enabled (new google-genai).")
     except ImportError:
         try:
             import google.generativeai as genai_old
@@ -41,9 +44,9 @@ if GEMINI_API_KEY:
             USE_AI = True
             logger.info("Gemini AI enabled (legacy library).")
         except ImportError:
-            logger.warning("No Gemini library installed – AI disabled.")
+            logger.warning("No Gemini library – AI disabled.")
 else:
-    logger.info("No Gemini API key – using simple replies.")
+    logger.info("No Gemini key – simple replies.")
 
 # ==================== BOT INIT ====================
 bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=4)
@@ -95,7 +98,7 @@ def cache_file(url, file_id, title, performer, duration):
 
 # ==================== RATE LIMITER ====================
 user_last_request = {}
-RATE_LIMIT = 1  # seconds
+RATE_LIMIT = 1
 
 def is_limited(user_id):
     now = time.time()
@@ -104,9 +107,8 @@ def is_limited(user_id):
     user_last_request[user_id] = now
     return False
 
-# ==================== AUDIO HELPERS ====================
+# ==================== AUDIO DOWNLOAD (with cookies) ====================
 def download_audio(url):
-    """Download best audio, return (bytes, title, uploader, duration). Raises with details on error."""
     with tempfile.TemporaryDirectory() as tmpdir:
         outtmpl = os.path.join(tmpdir, '%(title)s.%(ext)s')
         cmd = [
@@ -119,9 +121,16 @@ def download_audio(url):
             '--print', 'uploader',
             '--print', 'duration',
             '--no-playlist',
-            '--no-warnings',
             url
         ]
+        # Use cookies file if it exists (for logged-in session)
+        if os.path.isfile(COOKIES_FILE):
+            cmd.insert(1, '--cookies')
+            cmd.insert(2, COOKIES_FILE)
+            logger.info("Using cookies file for yt-dlp.")
+        else:
+            logger.warning("No cookies file found – may hit bot detection.")
+
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             error_msg = result.stderr.strip().split('\n')[-1] if result.stderr else "Unknown yt-dlp error"
@@ -133,7 +142,7 @@ def download_audio(url):
         files = os.listdir(tmpdir)
         audio_file = next((f for f in files if f.endswith('.m4a')), None)
         if not audio_file:
-            raise Exception("No audio file was created")
+            raise Exception("No audio file created")
         with open(os.path.join(tmpdir, audio_file), 'rb') as f:
             audio_data = f.read()
         return audio_data, title, uploader, duration
@@ -156,10 +165,12 @@ def create_glass_thumbnail(thumb_url):
         logger.error(f"Thumbnail error: {e}")
         return None
 
-# ==================== SONG SEARCH & SEND ====================
+# ==================== SONG SEARCH ====================
 def search_songs(query, limit=5):
-    """Return list of dicts with title, uploader, url, duration, thumb."""
     cmd = ['yt-dlp', f'ytsearch{limit}:{query}', '--flat-playlist', '--dump-json', '--no-warnings']
+    if os.path.isfile(COOKIES_FILE):
+        cmd.insert(1, '--cookies')
+        cmd.insert(2, COOKIES_FILE)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
         entries = []
@@ -185,8 +196,6 @@ def search_songs(query, limit=5):
         return []
 
 def send_audio(chat_id, url, reply_to=None):
-    """Download and send audio; show exact error if it fails."""
-    # Check cache first
     cached = get_cached_file(url)
     if cached:
         file_id, title, performer, duration = cached
@@ -194,24 +203,20 @@ def send_audio(chat_id, url, reply_to=None):
             bot.send_audio(chat_id, file_id, caption=f"🎵 {title} - {performer}", reply_to_message_id=reply_to)
             return
         except:
-            pass  # re-download if file id expired
+            pass
 
     try:
         audio_data, title, uploader, duration = download_audio(url)
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Download failed: {error_msg}")
-        bot.send_message(chat_id, f"❌ Failed to download the audio.\n\n`{error_msg}`", parse_mode='Markdown')
+        bot.send_message(chat_id, f"❌ Failed to download.\n\n`{error_msg}`", parse_mode='Markdown')
         return
 
-    # Build thumbnail URL (fallback if extraction failed)
+    # Thumbnail
     thumb_url = ""
     if 'youtu' in url:
-        # Extract video ID
-        if 'v=' in url:
-            vid = url.split('v=')[-1].split('&')[0]
-        else:
-            vid = url.split('/')[-1]
+        vid = url.split('v=')[-1].split('&')[0] if 'v=' in url else url.split('/')[-1]
         thumb_url = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
     thumb_io = create_glass_thumbnail(thumb_url) if thumb_url else None
 
@@ -243,14 +248,9 @@ If the user asks for a song, say something like "Main aapke liye gaana dhundh ra
 Now reply:"""
     try:
         if 'client' in globals():
-            # New library
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt
-            )
+            response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
             return response.text.strip()
         else:
-            # Old library fallback
             response = model_old.generate_content(prompt)
             return response.text.strip()
     except Exception as e:
@@ -295,7 +295,7 @@ def chosen_inline(chosen_result):
     if entries:
         send_audio(chosen_result.from_user.id, entries[0]['url'])
 
-# ==================== COMMAND HANDLERS ====================
+# ==================== COMMANDS ====================
 @bot.message_handler(commands=['start'])
 def start(message):
     first_name = message.from_user.first_name
@@ -347,27 +347,20 @@ def play_callback(call):
 def handle_text(message):
     if message.text.startswith('/'):
         return
-
     user_id = message.from_user.id
     if is_limited(user_id):
         return
 
     first_name = message.from_user.first_name
     text = message.text.strip()
-
     ai_reply = ai_chat(first_name, text) if USE_AI else None
 
-    song_keywords = ['song', 'gaana', 'gana', 'play', 'music', 'geet', 'bajao', 'suno']
-    is_song_request = any(kw in text.lower() for kw in song_keywords)
-
-    if is_song_request:
-        cleaned = re.sub('|'.join(song_keywords), '', text, flags=re.IGNORECASE).strip()
+    song_kw = ['song', 'gaana', 'gana', 'play', 'music', 'geet', 'bajao', 'suno']
+    if any(kw in text.lower() for kw in song_kw):
+        cleaned = re.sub('|'.join(song_kw), '', text, flags=re.IGNORECASE).strip()
         if not cleaned:
             cleaned = text
-        if ai_reply:
-            reply = ai_reply
-        else:
-            reply = f"🎵 Main aapke liye **{cleaned}** dhundh raha hoon !!"
+        reply = ai_reply or f"🎵 Main aapke liye **{cleaned}** dhundh raha hoon !!"
         bot.reply_to(message, reply, parse_mode='Markdown')
         entries = search_songs(cleaned, 1)
         if entries:
@@ -396,10 +389,10 @@ def set_video(message):
 def help_cmd(message):
     bot.reply_to(message,
         "📖 **Music Bot Help**\n"
-        "• Type a song name directly (e.g., *play dil diyan gallan*)\n"
+        "• Type a song name (e.g., `play dil diyan gallan`)\n"
         "• Use inline search: `@botusername song`\n"
         "• /search <song> – list results\n"
-        "• /set_video – admin only, set a welcome video\n"
+        "• /set_video – admin only, set welcome video\n"
         "• I speak Hindi & English 😊",
         parse_mode='Markdown')
 
@@ -407,9 +400,6 @@ def help_cmd(message):
 if __name__ == '__main__':
     init_db()
     logger.info("Music bot started.")
-
-    # Fix 409 Conflict – clear leftover webhook
     bot.remove_webhook()
     time.sleep(1)
-
     bot.infinity_polling()
