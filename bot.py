@@ -24,19 +24,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== GEMINI AI SETUP ====================
+# ==================== GEMINI AI SETUP (NEW LIBRARY) ====================
 GEMINI_API_KEY = "AIzaSyAXERqkAEErXF7-4qSlap6tO9QSSmJmpf0"
 USE_AI = False
 if GEMINI_API_KEY:
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
         USE_AI = True
-        logger.info("Gemini AI enabled.")
+        logger.info("Gemini AI enabled (google-genai).")
     except ImportError:
-        logger.warning("google-generativeai not installed – AI disabled.")
-        USE_AI = False
+        try:
+            import google.generativeai as genai_old
+            genai_old.configure(api_key=GEMINI_API_KEY)
+            model_old = genai_old.GenerativeModel('gemini-1.5-flash')
+            USE_AI = True
+            logger.info("Gemini AI enabled (legacy library).")
+        except ImportError:
+            logger.warning("No Gemini library installed – AI disabled.")
 else:
     logger.info("No Gemini API key – using simple replies.")
 
@@ -90,7 +95,7 @@ def cache_file(url, file_id, title, performer, duration):
 
 # ==================== RATE LIMITER ====================
 user_last_request = {}
-RATE_LIMIT = 1  # seconds between requests
+RATE_LIMIT = 1  # seconds
 
 def is_limited(user_id):
     now = time.time()
@@ -101,7 +106,7 @@ def is_limited(user_id):
 
 # ==================== AUDIO HELPERS ====================
 def download_audio(url):
-    """Download best audio, return (bytes, title, uploader, duration) or raise with details."""
+    """Download best audio, return (bytes, title, uploader, duration). Raises with details on error."""
     with tempfile.TemporaryDirectory() as tmpdir:
         outtmpl = os.path.join(tmpdir, '%(title)s.%(ext)s')
         cmd = [
@@ -114,11 +119,11 @@ def download_audio(url):
             '--print', 'uploader',
             '--print', 'duration',
             '--no-playlist',
+            '--no-warnings',
             url
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            # Get the last meaningful error line from stderr
             error_msg = result.stderr.strip().split('\n')[-1] if result.stderr else "Unknown yt-dlp error"
             raise Exception(f"yt-dlp failed: {error_msg}")
         lines = result.stdout.strip().split('\n')
@@ -153,6 +158,7 @@ def create_glass_thumbnail(thumb_url):
 
 # ==================== SONG SEARCH & SEND ====================
 def search_songs(query, limit=5):
+    """Return list of dicts with title, uploader, url, duration, thumb."""
     cmd = ['yt-dlp', f'ytsearch{limit}:{query}', '--flat-playlist', '--dump-json', '--no-warnings']
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
@@ -179,6 +185,8 @@ def search_songs(query, limit=5):
         return []
 
 def send_audio(chat_id, url, reply_to=None):
+    """Download and send audio; show exact error if it fails."""
+    # Check cache first
     cached = get_cached_file(url)
     if cached:
         file_id, title, performer, duration = cached
@@ -186,7 +194,7 @@ def send_audio(chat_id, url, reply_to=None):
             bot.send_audio(chat_id, file_id, caption=f"🎵 {title} - {performer}", reply_to_message_id=reply_to)
             return
         except:
-            pass
+            pass  # re-download if file id expired
 
     try:
         audio_data, title, uploader, duration = download_audio(url)
@@ -196,8 +204,16 @@ def send_audio(chat_id, url, reply_to=None):
         bot.send_message(chat_id, f"❌ Failed to download the audio.\n\n`{error_msg}`", parse_mode='Markdown')
         return
 
-    thumb_url = f"https://i.ytimg.com/vi/{url.split('v=')[-1]}/hqdefault.jpg"
-    thumb_io = create_glass_thumbnail(thumb_url)
+    # Build thumbnail URL (fallback if extraction failed)
+    thumb_url = ""
+    if 'youtu' in url:
+        # Extract video ID
+        if 'v=' in url:
+            vid = url.split('v=')[-1].split('&')[0]
+        else:
+            vid = url.split('/')[-1]
+        thumb_url = f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+    thumb_io = create_glass_thumbnail(thumb_url) if thumb_url else None
 
     audio_file = BytesIO(audio_data)
     audio_file.name = f"{title}.m4a"
@@ -222,12 +238,21 @@ def ai_chat(user_name, user_message):
     prompt = f"""You are a friendly Hindi/English music assistant bot.
 User name: {user_name}
 User says: {user_message}
-Reply naturally in Hinglish or English, and keep it short.
+Reply naturally in Hinglish or English, keep it short.
 If the user asks for a song, say something like "Main aapke liye gaana dhundh raha hoon!".
 Now reply:"""
     try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        if 'client' in globals():
+            # New library
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
+            return response.text.strip()
+        else:
+            # Old library fallback
+            response = model_old.generate_content(prompt)
+            return response.text.strip()
     except Exception as e:
         logger.error(f"Gemini error: {e}")
         return None
@@ -383,7 +408,7 @@ if __name__ == '__main__':
     init_db()
     logger.info("Music bot started.")
 
-    # Fix the 409 Conflict – clear leftover webhook / pending updates
+    # Fix 409 Conflict – clear leftover webhook
     bot.remove_webhook()
     time.sleep(1)
 
