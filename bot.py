@@ -13,7 +13,7 @@ import requests
 import subprocess
 
 # ==================== CONFIG ====================
-BOT_TOKEN = "7096730412:AAHhv6RLDMW_WXfo2QMUuEdRRRTrAMOTsn0"
+BOT_TOKEN = "6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU"
 ADMIN_IDS = [2119464081]
 
 # ==================== LOGGING ====================
@@ -101,6 +101,7 @@ def is_limited(user_id):
 
 # ==================== AUDIO HELPERS ====================
 def download_audio(url):
+    """Download best audio, return (bytes, title, uploader, duration) or raise with details."""
     with tempfile.TemporaryDirectory() as tmpdir:
         outtmpl = os.path.join(tmpdir, '%(title)s.%(ext)s')
         cmd = [
@@ -112,11 +113,14 @@ def download_audio(url):
             '--print', 'title',
             '--print', 'uploader',
             '--print', 'duration',
+            '--no-playlist',
             url
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            raise Exception("yt-dlp failed")
+            # Get the last meaningful error line from stderr
+            error_msg = result.stderr.strip().split('\n')[-1] if result.stderr else "Unknown yt-dlp error"
+            raise Exception(f"yt-dlp failed: {error_msg}")
         lines = result.stdout.strip().split('\n')
         title = lines[-3] if len(lines) >= 3 else "Unknown"
         uploader = lines[-2] if len(lines) >= 2 else "Unknown"
@@ -124,7 +128,7 @@ def download_audio(url):
         files = os.listdir(tmpdir)
         audio_file = next((f for f in files if f.endswith('.m4a')), None)
         if not audio_file:
-            raise Exception("No audio file")
+            raise Exception("No audio file was created")
         with open(os.path.join(tmpdir, audio_file), 'rb') as f:
             audio_data = f.read()
         return audio_data, title, uploader, duration
@@ -187,8 +191,9 @@ def send_audio(chat_id, url, reply_to=None):
     try:
         audio_data, title, uploader, duration = download_audio(url)
     except Exception as e:
-        logger.error(f"Download failed: {e}")
-        bot.send_message(chat_id, "❌ Failed to download the audio.")
+        error_msg = str(e)
+        logger.error(f"Download failed: {error_msg}")
+        bot.send_message(chat_id, f"❌ Failed to download the audio.\n\n`{error_msg}`", parse_mode='Markdown')
         return
 
     thumb_url = f"https://i.ytimg.com/vi/{url.split('v=')[-1]}/hqdefault.jpg"
