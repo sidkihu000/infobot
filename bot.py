@@ -8,10 +8,9 @@ import sqlite3
 import logging
 import time
 from datetime import datetime, timedelta
-from functools import lru_cache
 from dotenv import load_dotenv
 
-# ==================== LOGGING SETUP ===================
+# ==================== LOGGING ===================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -22,23 +21,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== ENVIRONMENT VARIABLES ====================
+# ==================== ENVIRONMENT & API KEYS ====================
 load_dotenv()
 
-# --- Bot token (hardcoded – only for development!) ---
+# Bot token
 API_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"
 if not API_TOKEN:
-    logger.critical("Bot token is missing")
+    logger.critical("Bot token missing")
     raise ValueError("Bot token not set")
 
-# --- NumVerify API key (still loaded from env or fallback) ---
-PHONE_API_KEY = os.getenv('NUMVERIFY_API_KEY', '60762b849a6d6a7cf4f9c63bb68514c0')
-PHONE_API_URL = 'http://apilayer.net/api/validate'
+# ---- Your real API keys (can be overridden via .env) ----
+VERIPHONE_API_KEY = os.getenv('VERIPHONE_API_KEY', '161EEE47A53242C7B8E11F414B34C23B')
+IPQS_PHONE_API_KEY = os.getenv('IPQS_PHONE_API_KEY', '96d1fa6b388a44d2a789e266593b7d3f')
+IPQS_IP_API_KEY = os.getenv('IPQS_IP_API_KEY', '64b6081d2e6a43ba9b75498b473c7a8e')
+
+# API endpoints
+VERIPHONE_URL = "https://api.veriphone.io/v2/verify"
+IPQS_PHONE_URL = "https://www.ipqualityscore.com/api/json/phone"
+IPQS_IP_URL = "https://www.ipqualityscore.com/api/json/ip"
 
 # ==================== BOT INIT ====================
 bot = telebot.TeleBot(API_TOKEN)
 
-# ==================== DATABASE SETUP (SQLite) ====================
+# ==================== DATABASE ====================
 DB_FILE = 'bot_data.db'
 
 def init_db():
@@ -66,10 +71,9 @@ def init_db():
     conn.commit()
     conn.close()
     logger.info("Database initialized.")
-
 init_db()
 
-# ==================== DATABASE HELPERS ====================
+# Database helpers (unchanged)
 def db_connect():
     return sqlite3.connect(DB_FILE)
 
@@ -80,13 +84,8 @@ def get_user(telegram_id):
     row = c.fetchone()
     conn.close()
     if row:
-        return {
-            'telegram_id': row[0],
-            'name': row[1],
-            'phone': row[2],
-            'access_level': row[3],
-            'registered_at': row[4]
-        }
+        return {'telegram_id': row[0], 'name': row[1], 'phone': row[2],
+                'access_level': row[3], 'registered_at': row[4]}
     return None
 
 def add_or_update_user(telegram_id, name=None, phone=None, access_level='user'):
@@ -94,18 +93,14 @@ def add_or_update_user(telegram_id, name=None, phone=None, access_level='user'):
     c = conn.cursor()
     existing = get_user(telegram_id)
     if existing:
-        c.execute('''
-            UPDATE users
-            SET name = COALESCE(?, name),
-                phone = COALESCE(?, phone),
-                access_level = ?
-            WHERE telegram_id = ?
-        ''', (name, phone, access_level, str(telegram_id)))
+        c.execute('''UPDATE users SET name = COALESCE(?, name),
+                     phone = COALESCE(?, phone), access_level = ?
+                     WHERE telegram_id = ?''',
+                  (name, phone, access_level, str(telegram_id)))
     else:
-        c.execute('''
-            INSERT INTO users (telegram_id, name, phone, access_level)
-            VALUES (?, ?, ?, ?)
-        ''', (str(telegram_id), name, phone, access_level))
+        c.execute('''INSERT INTO users (telegram_id, name, phone, access_level)
+                     VALUES (?, ?, ?, ?)''',
+                  (str(telegram_id), name, phone, access_level))
     conn.commit()
     conn.close()
     logger.info(f"User {telegram_id} added/updated.")
@@ -125,15 +120,14 @@ def get_all_users():
     c.execute("SELECT telegram_id, name, phone, access_level, registered_at FROM users")
     rows = c.fetchall()
     conn.close()
-    return [{'telegram_id': r[0], 'name': r[1], 'phone': r[2], 'access_level': r[3], 'registered_at': r[4]} for r in rows]
+    return [{'telegram_id': r[0], 'name': r[1], 'phone': r[2],
+             'access_level': r[3], 'registered_at': r[4]} for r in rows]
 
 def add_lookup_history(user_id, phone, result):
     conn = db_connect()
     c = conn.cursor()
-    c.execute('''
-        INSERT INTO lookup_history (user_id, phone, result_json)
-        VALUES (?, ?, ?)
-    ''', (str(user_id), phone, json.dumps(result)))
+    c.execute('''INSERT INTO lookup_history (user_id, phone, result_json)
+                 VALUES (?, ?, ?)''', (str(user_id), phone, json.dumps(result)))
     conn.commit()
     conn.close()
     logger.info(f"Lookup history added for user {user_id}.")
@@ -141,13 +135,9 @@ def add_lookup_history(user_id, phone, result):
 def get_user_history(user_id, limit=5):
     conn = db_connect()
     c = conn.cursor()
-    c.execute('''
-        SELECT phone, result_json, looked_up_at
-        FROM lookup_history
-        WHERE user_id = ?
-        ORDER BY looked_up_at DESC
-        LIMIT ?
-    ''', (str(user_id), limit))
+    c.execute('''SELECT phone, result_json, looked_up_at FROM lookup_history
+                 WHERE user_id = ? ORDER BY looked_up_at DESC LIMIT ?''',
+              (str(user_id), limit))
     rows = c.fetchall()
     conn.close()
     return rows
@@ -168,14 +158,12 @@ def get_total_lookups():
     conn.close()
     return count
 
-# ==================== ADMIN CHECK ====================
 def is_admin(user_id):
     user = get_user(user_id)
     return user and user['access_level'] == 'admin'
 
 # ==================== RATE LIMITING ====================
 rate_limit_store = {}
-
 def is_rate_limited(user_id, limit=10, period=60):
     now = time.time()
     timestamps = rate_limit_store.get(user_id, [])
@@ -186,7 +174,7 @@ def is_rate_limited(user_id, limit=10, period=60):
     rate_limit_store[user_id] = timestamps
     return False
 
-# ==================== PHONE LOOKUP WITH CACHE ====================
+# ==================== CACHE ====================
 phone_cache = {}
 CACHE_TTL = 3600
 
@@ -202,7 +190,82 @@ def get_cached_lookup(phone):
 def set_cached_lookup(phone, data):
     phone_cache[phone] = (data, time.time())
 
-# ==================== PHONE LOOKUP API ====================
+# ==================== REAL API CALLS ====================
+
+def veriphone_lookup(phone):
+    """Basic phone validation via Veriphone"""
+    try:
+        params = {'key': VERIPHONE_API_KEY, 'phone': phone}
+        resp = requests.get(VERIPHONE_URL, params=params, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            'valid': data.get('phone_valid', False),
+            'country': data.get('country', ''),
+            'carrier': data.get('carrier', ''),
+            'line_type': data.get('phone_type', ''),
+            'location': f"{data.get('country', '')}"
+        }
+    except Exception as e:
+        logger.error(f"Veriphone API error: {e}")
+        return None
+
+def ipqs_phone_lookup(phone):
+    """Deep phone validation via IPQS"""
+    try:
+        url = f"{IPQS_PHONE_URL}/{IPQS_PHONE_API_KEY}/{phone}"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get('success'):
+            return None
+        # Extract rich fields
+        return {
+            'valid': True,
+            'carrier': data.get('carrier', ''),
+            'line_type': data.get('line_type', ''),
+            'country': data.get('country', ''),
+            'city': data.get('city', ''),
+            'region': data.get('region', ''),
+            'zip_code': data.get('zip_code', ''),
+            'latitude': data.get('latitude'),
+            'longitude': data.get('longitude'),
+            'fraud_score': data.get('fraud_score', 0),
+            'active_status': data.get('active_status', ''),
+            'isp': data.get('isp', '')  # sometimes populated
+        }
+    except Exception as e:
+        logger.error(f"IPQS Phone API error: {e}")
+        return None
+
+def ipqs_ip_lookup(ip):
+    """IP intelligence via IPQS"""
+    try:
+        url = f"{IPQS_IP_URL}/{IPQS_IP_API_KEY}/{ip}"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get('success'):
+            return None
+        return {
+            'ip': ip,
+            'country': data.get('country_code', ''),
+            'city': data.get('city', ''),
+            'region': data.get('region', ''),
+            'isp': data.get('ISP', ''),
+            'organization': data.get('organization', ''),
+            'latitude': data.get('latitude'),
+            'longitude': data.get('longitude'),
+            'fraud_score': data.get('fraud_score', 0),
+            'proxy': data.get('proxy', False),
+            'vpn': data.get('vpn', False),
+            'tor': data.get('tor', False)
+        }
+    except Exception as e:
+        logger.error(f"IPQS IP API error: {e}")
+        return None
+
+# ==================== COMBINED PHONE LOOKUP ====================
 def lookup_phone_number(phone):
     phone = re.sub(r'\s+', '', phone)
     if not phone.startswith('+'):
@@ -210,79 +273,44 @@ def lookup_phone_number(phone):
 
     cached = get_cached_lookup(phone)
     if cached:
-        logger.info(f"Cache hit for {phone}")
         return cached
 
-    if not PHONE_API_KEY:
-        result = mock_lookup(phone)
-        set_cached_lookup(phone, result)
-        return result
+    # 1. Veriphone (basic)
+    veri = veriphone_lookup(phone)
+    # 2. IPQS Phone (enriched)
+    ipqs = ipqs_phone_lookup(phone)
 
-    try:
-        params = {
-            'access_key': PHONE_API_KEY,
-            'number': phone,
-            'format': 1
-        }
-        response = requests.get(PHONE_API_URL, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+    # Build final result from both (prefer IPQS over Veriphone)
+    final = {}
+    if ipqs:
+        final['valid'] = ipqs.get('valid', False)
+        final['carrier'] = ipqs.get('carrier') or (veri.get('carrier') if veri else 'N/A')
+        final['line_type'] = ipqs.get('line_type') or (veri.get('line_type') if veri else 'N/A')
+        final['country'] = ipqs.get('country') or (veri.get('country') if veri else 'N/A')
+        final['city'] = ipqs.get('city', '')
+        final['region'] = ipqs.get('region', '')
+        final['zip_code'] = ipqs.get('zip_code', '')
+        final['latitude'] = ipqs.get('latitude')
+        final['longitude'] = ipqs.get('longitude')
+        final['fraud_score'] = ipqs.get('fraud_score')
+        final['isp'] = ipqs.get('isp') or ''
+    elif veri:
+        final['valid'] = veri.get('valid', False)
+        final['carrier'] = veri.get('carrier', 'N/A')
+        final['line_type'] = veri.get('line_type', 'N/A')
+        final['country'] = veri.get('country', 'N/A')
+        final['city'] = ''
+        final['region'] = ''
+        final['zip_code'] = ''
+        final['latitude'] = None
+        final['longitude'] = None
+        final['fraud_score'] = None
+        final['isp'] = ''
+    else:
+        final = {'valid': False, 'error': 'API unavailable'}
 
-        if not data.get('valid'):
-            result = {
-                'name': 'Invalid Number',
-                'address': 'N/A',
-                'location': 'N/A',
-                'carrier': 'N/A',
-                'line_type': 'N/A'
-            }
-        else:
-            result = {
-                'name': data.get('name', 'Unknown'),
-                'address': f"{data.get('location', '')}, {data.get('country_name', '')}",
-                'location': data.get('country_name', 'Unknown'),
-                'carrier': data.get('carrier', 'Unknown'),
-                'line_type': data.get('line_type', 'Unknown')
-            }
-        set_cached_lookup(phone, result)
-        return result
-    except Exception as e:
-        logger.error(f"API error: {e}")
-        result = mock_lookup(phone)
-        set_cached_lookup(phone, result)
-        return result
-
-def mock_lookup(phone):
-    mock_data = {
-        '+1234567890': {
-            'name': 'John Doe',
-            'address': '123 Main St, New York, NY 10001',
-            'location': 'New York, USA',
-            'carrier': 'AT&T',
-            'line_type': 'mobile'
-        },
-        '+9876543210': {
-            'name': 'Jane Smith',
-            'address': '456 Oak Ave, Los Angeles, CA 90001',
-            'location': 'Los Angeles, USA',
-            'carrier': 'Verizon',
-            'line_type': 'mobile'
-        },
-        '+5555555555': {
-            'name': 'Bob Johnson',
-            'address': '789 Pine Rd, Chicago, IL 60601',
-            'location': 'Chicago, USA',
-            'carrier': 'T-Mobile',
-            'line_type': 'mobile'
-        }
-    }
-    return mock_data.get(phone, {
-        'name': 'Unknown',
-        'address': 'Address not available',
-        'location': 'Location not available',
-        'carrier': 'Carrier unknown',
-        'line_type': 'Unknown'
-    })
+    set_cached_lookup(phone, final)
+    return final
 
 def validate_phone_number(phone):
     phone = re.sub(r'\s+', '', phone)
@@ -309,10 +337,8 @@ def send_welcome(message):
     btn_lookup = types.InlineKeyboardButton("📞 Lookup Number", callback_data='lookup_number')
     markup.add(btn_info, btn_help, btn_admin, btn_website, btn_search, btn_list, btn_lookup)
     bot.reply_to(message,
-        f"Welcome {message.from_user.first_name}!\n"
-        "Choose an option:",
-        reply_markup=markup
-    )
+        f"Welcome {message.from_user.first_name}!\nChoose an option:",
+        reply_markup=markup)
     logger.info(f"User {message.from_user.id} started bot.")
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -325,8 +351,7 @@ def handle_callback(call):
             "Please send me a phone number (international format).\n"
             "Example: `+1234567890`\n\n"
             "Type /cancel to cancel.",
-            parse_mode='Markdown'
-        )
+            parse_mode='Markdown')
     elif call.data == 'help':
         bot.answer_callback_query(call.id)
         bot.send_message(call.message.chat.id,
@@ -334,7 +359,8 @@ def handle_callback(call):
             "- /start – main menu\n"
             "- /search <telegram_id> – find user by ID\n"
             "- /list – all users (admin only)\n"
-            "- /lookup <phone> – phone info\n"
+            "- /lookup <phone> – phone info (Veriphone + IPQS)\n"
+            "- /ip <ip> – IP intelligence lookup\n"
             "- /add <id> <name> <phone> – add user (admin only)\n"
             "- /delete <id> – remove user (admin only)\n"
             "- /cancel – cancel pending operation\n"
@@ -343,12 +369,8 @@ def handle_callback(call):
             "- /stats – bot stats (admin only)\n"
             "- /export – CSV of users (admin only)\n"
             "- /reset – reset your pending state\n\n"
-            "🔎 **New:** Click 'Search User' to find a phone number by Telegram username.",
-            parse_mode='Markdown'
-        )
-    # =========================================================
-    # ENHANCED: search_user callback – now uses Telegram API
-    # =========================================================
+            "🔎 **Search by username:** Click 'Search User' and send a Telegram username.",
+            parse_mode='Markdown')
     elif call.data == 'search_user':
         user_states[call.from_user.id] = 'waiting_for_username'
         bot.answer_callback_query(call.id)
@@ -356,8 +378,7 @@ def handle_callback(call):
             "🔍 **Search User by Telegram Username**\n\n"
             "Please send the **username** (e.g., `@JohnDoe` or `JohnDoe`).\n"
             "Type /cancel to cancel.",
-            parse_mode='Markdown'
-        )
+            parse_mode='Markdown')
     elif call.data == 'list_users':
         bot.answer_callback_query(call.id)
         list_all_users(call.message)
@@ -367,14 +388,13 @@ def handle_callback(call):
         bot.send_message(call.message.chat.id,
             "📞 **Phone Number Lookup**\n"
             "Please send a phone number (international format).",
-            parse_mode='Markdown'
-        )
+            parse_mode='Markdown')
 
 @bot.message_handler(func=lambda message: True)
 def handle_phone_lookup(message):
     user_id = message.from_user.id
 
-    # Original phone lookup state
+    # Phone lookup flow
     if user_states.get(user_id) == 'waiting_for_phone':
         user_states[user_id] = None
         if message.text.lower() in ['/cancel', 'cancel', 'stop']:
@@ -382,12 +402,12 @@ def handle_phone_lookup(message):
             return
 
         if is_rate_limited(user_id, limit=10, period=60):
-            bot.reply_to(message, "⏳ Rate limit exceeded. Please wait.")
+            bot.reply_to(message, "⏳ Rate limit exceeded.")
             return
 
         phone = validate_phone_number(message.text.strip())
         if not phone:
-            bot.reply_to(message, "❌ Invalid format. Use e.g., `+1234567890`.", parse_mode='Markdown')
+            bot.reply_to(message, "❌ Invalid format.")
             return
 
         try:
@@ -395,22 +415,34 @@ def handle_phone_lookup(message):
             add_lookup_history(user_id, phone, info)
         except Exception as e:
             logger.error(f"Lookup error: {e}")
-            bot.reply_to(message, "❌ API error. Try again later.")
+            bot.reply_to(message, "❌ API error.")
             return
 
-        response = f"✅ **Phone Lookup Results**\n\n"
-        response += f"📞 **Number:** `{phone}`\n"
-        response += f"👤 **Owner:** {info.get('name', 'N/A')}\n"
-        response += f"🏠 **Address:** {info.get('address', 'N/A')}\n"
-        response += f"📍 **Location:** {info.get('location', 'N/A')}\n"
-        response += f"📶 **Carrier:** {info.get('carrier', 'N/A')}\n"
-        response += f"📱 **Line Type:** {info.get('line_type', 'N/A')}"
+        response = f"✅ **Phone Lookup Results**\n\n📞 `{phone}`\n"
+        if info.get('valid') == False:
+            response += "❌ **Invalid / not found**\n"
+        else:
+            response += f"📶 **Carrier:** {info.get('carrier', 'N/A')}\n"
+            response += f"📱 **Line Type:** {info.get('line_type', 'N/A')}\n"
+            country = info.get('country', '')
+            city = info.get('city', '')
+            region = info.get('region', '')
+            zip_code = info.get('zip_code', '')
+            if city or region or country:
+                location_parts = [city, region, country]
+                response += f"📍 **Location:** {', '.join(filter(None, location_parts))}\n"
+            if zip_code:
+                response += f"📮 **ZIP:** {zip_code}\n"
+            if info.get('isp'):
+                response += f"🌐 **ISP:** {info['isp']}\n"
+            if info.get('latitude') and info.get('longitude'):
+                response += f"🗺️ **Coordinates:** {info['latitude']}, {info['longitude']}\n"
+            if info.get('fraud_score') is not None:
+                response += f"⚠️ **Fraud Score:** {info['fraud_score']}/100\n"
         bot.reply_to(message, response, parse_mode='Markdown')
         logger.info(f"Lookup performed for user {user_id}, phone {phone}")
 
-    # =========================================================
-    # NEW: username lookup state using Telegram API + database
-    # =========================================================
+    # Username lookup flow
     elif user_states.get(user_id) == 'waiting_for_username':
         user_states[user_id] = None
         if message.text.lower() in ['/cancel', 'cancel', 'stop']:
@@ -418,7 +450,6 @@ def handle_phone_lookup(message):
             return
 
         raw_username = message.text.strip()
-        # Remove leading @ if present
         username = raw_username.lstrip('@')
 
         if not username:
@@ -426,39 +457,35 @@ def handle_phone_lookup(message):
             return
 
         try:
-            # Attempt to resolve the username to a Telegram user ID
-            # bot.get_chat('@username') works if the user has ever started a chat with the bot
             chat = bot.get_chat('@' + username)
             tg_id = str(chat.id)
-
-            # Look up in our database
             user = get_user(tg_id)
             if user and user.get('phone'):
                 bot.reply_to(message,
                     f"✅ **User Found**\n"
-                    f"👤 **Username:** @{username}\n"
-                    f"🆔 **Telegram ID:** `{tg_id}`\n"
-                    f"📞 **Phone:** `{user['phone']}`",
+                    f"👤 @{username}\n"
+                    f"🆔 ID: `{tg_id}`\n"
+                    f"📞 Phone: `{user['phone']}`\n\n"
+                    f"🔍 Use /lookup {user['phone']} for detailed info.",
                     parse_mode='Markdown')
             else:
                 bot.reply_to(message,
-                    f"⚠️ @{username} (ID: `{tg_id}`) is known to Telegram, but we have no phone number on file for them.",
+                    f"⚠️ @{username} (ID: `{tg_id}`) found, but no phone on file.",
                     parse_mode='Markdown')
         except telebot.apihelper.ApiTelegramException as e:
             if e.error_code == 400 and "chat not found" in str(e).lower():
-                bot.reply_to(message, f"❌ Username @{username} not found or the bot hasn’t interacted with them.")
+                bot.reply_to(message, f"❌ Username @{username} not found.")
             else:
                 bot.reply_to(message, f"❌ Telegram API error: {e.description}")
         except Exception as e:
             logger.error(f"Username lookup error: {e}")
-            bot.reply_to(message, "❌ An unexpected error occurred.")
+            bot.reply_to(message, "❌ Unexpected error.")
         return
 
-    # Fallback for unknown commands or messages
     else:
         if message.text.startswith('/'):
-            if message.text.lower() not in ['/start','/search','/list','/add','/delete','/lookup','/cancel','/history','/myinfo','/stats','/export','/reset']:
-                bot.reply_to(message, "❓ Unknown command. Use /start.")
+            if message.text.lower() not in ['/start','/search','/list','/add','/delete','/lookup','/cancel','/history','/myinfo','/stats','/export','/reset','/ip']:
+                bot.reply_to(message, "❓ Unknown command.")
         else:
             bot.reply_to(message, "Use /start to see options.")
 
@@ -467,37 +494,91 @@ def lookup_command(message):
     try:
         parts = message.text.split()
         if len(parts) < 2:
-            bot.reply_to(message, "Usage: /lookup <phone>", parse_mode='Markdown')
+            bot.reply_to(message, "Usage: /lookup <phone>")
             return
 
-        if is_rate_limited(message.from_user.id, limit=10, period=60):
-            bot.reply_to(message, "⏳ Rate limit exceeded. Wait a moment.")
+        if is_rate_limited(message.from_user.id):
+            bot.reply_to(message, "⏳ Rate limit exceeded.")
             return
 
         phone = validate_phone_number(parts[1].strip())
         if not phone:
-            bot.reply_to(message, "❌ Invalid format. Use e.g., `+1234567890`.", parse_mode='Markdown')
+            bot.reply_to(message, "❌ Invalid format.")
             return
+
         info = lookup_phone_number(phone)
         add_lookup_history(message.from_user.id, phone, info)
-        response = f"✅ **Phone Lookup Results**\n\n📞 **Number:** `{phone}`\n👤 **Owner:** {info.get('name', 'N/A')}\n🏠 **Address:** {info.get('address', 'N/A')}\n📍 **Location:** {info.get('location', 'N/A')}\n📶 **Carrier:** {info.get('carrier', 'N/A')}\n📱 **Line Type:** {info.get('line_type', 'N/A')}"
+
+        response = f"✅ **Phone Lookup**\n\n📞 `{phone}`\n"
+        if not info.get('valid'):
+            response += "❌ Invalid / not found\n"
+        else:
+            response += f"📶 Carrier: {info.get('carrier','N/A')}\n"
+            response += f"📱 Line Type: {info.get('line_type','N/A')}\n"
+            loc = ', '.join(filter(None, [info.get('city',''), info.get('region',''), info.get('country','')]))
+            response += f"📍 Location: {loc or 'N/A'}\n"
+            if info.get('zip_code'):
+                response += f"📮 ZIP: {info['zip_code']}\n"
+            if info.get('isp'):
+                response += f"🌐 ISP: {info['isp']}\n"
+            if info.get('latitude') and info.get('longitude'):
+                response += f"🗺️ Coordinates: {info['latitude']}, {info['longitude']}\n"
+            if info.get('fraud_score') is not None:
+                response += f"⚠️ Fraud Score: {info['fraud_score']}/100\n"
         bot.reply_to(message, response, parse_mode='Markdown')
-        logger.info(f"Lookup via command for user {message.from_user.id}, phone {phone}")
     except Exception as e:
         logger.error(f"Lookup command error: {e}")
-        bot.reply_to(message, "❌ Error. Try again later.")
+        bot.reply_to(message, "❌ Error.")
 
+# ==================== NEW: IP LOOKUP COMMAND ====================
+@bot.message_handler(commands=['ip'])
+def ip_lookup_command(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /ip <ip_address>")
+            return
+
+        ip = parts[1].strip()
+        if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
+            bot.reply_to(message, "❌ Invalid IP format.")
+            return
+
+        info = ipqs_ip_lookup(ip)
+        if not info:
+            bot.reply_to(message, "❌ Unable to fetch IP info or invalid response.")
+            return
+
+        response = f"🌍 **IP Intelligence**\n\n🔢 `{ip}`\n"
+        response += f"🏳️ Country: {info.get('country','N/A')}\n"
+        response += f"🏙️ City/Region: {info.get('city','N/A')}, {info.get('region','N/A')}\n"
+        response += f"🌐 ISP: {info.get('isp','N/A')}\n"
+        response += f"🏢 Organization: {info.get('organization','N/A')}\n"
+        response += f"🗺️ Coordinates: {info.get('latitude','?')}, {info.get('longitude','?')}\n"
+        response += f"⚠️ Fraud Score: {info.get('fraud_score','?')}/100\n"
+        flags = []
+        if info.get('proxy'): flags.append('Proxy')
+        if info.get('vpn'): flags.append('VPN')
+        if info.get('tor'): flags.append('Tor')
+        if flags:
+            response += f"🚩 Flags: {', '.join(flags)}\n"
+        bot.reply_to(message, response, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"IP lookup error: {e}")
+        bot.reply_to(message, "❌ Error looking up IP.")
+
+# --- Other commands (history, myinfo, etc.) ---
 @bot.message_handler(commands=['history'])
 def history_command(message):
     user_id = message.from_user.id
     rows = get_user_history(user_id, limit=5)
     if not rows:
-        bot.reply_to(message, "📭 No lookup history found.")
+        bot.reply_to(message, "📭 No history.")
         return
-    response = "📜 **Your last 5 lookups:**\n\n"
+    response = "📜 **Last 5 lookups:**\n\n"
     for phone, result_json, looked_up_at in rows:
         result = json.loads(result_json)
-        response += f"📞 `{phone}` – {result.get('name','Unknown')} ({result.get('location','N/A')})\n"
+        response += f"📞 `{phone}` – {result.get('carrier','?')} ({result.get('country','?')})\n"
         response += f"   🕒 {looked_up_at}\n\n"
     bot.reply_to(message, response, parse_mode='Markdown')
 
@@ -505,7 +586,7 @@ def history_command(message):
 def myinfo_command(message):
     user = get_user(message.from_user.id)
     if not user:
-        bot.reply_to(message, "ℹ️ You are not registered in the database.")
+        bot.reply_to(message, "ℹ️ Not registered.")
         return
     response = f"👤 **Your Info**\n\n"
     response += f"🆔 Telegram ID: `{user['telegram_id']}`\n"
@@ -520,41 +601,37 @@ def reset_command(message):
     user_id = message.from_user.id
     if user_states.get(user_id) in ('waiting_for_phone', 'waiting_for_username'):
         user_states[user_id] = None
-        bot.reply_to(message, "✅ Your pending state has been reset.")
+        bot.reply_to(message, "✅ Reset.")
     else:
-        bot.reply_to(message, "ℹ️ You have no active operation to reset.")
+        bot.reply_to(message, "ℹ️ Nothing to reset.")
 
-# -------------------- Admin-only commands --------------------
 @bot.message_handler(commands=['add'])
 def add_user_command(message):
     if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ You are not authorized to use this command.")
+        bot.reply_to(message, "⛔ Admin only.")
         return
     try:
         parts = message.text.split()
         if len(parts) < 4:
             bot.reply_to(message, "Usage: /add <telegram_id> <name> <phone>")
             return
-        tg_id = parts[1].strip()
-        name = parts[2].strip()
-        phone = parts[3].strip()
+        tg_id, name, phone = parts[1].strip(), parts[2].strip(), parts[3].strip()
         if not tg_id.isdigit():
-            bot.reply_to(message, "❌ Invalid Telegram ID.")
+            bot.reply_to(message, "❌ Invalid ID.")
             return
         if get_user(tg_id):
-            bot.reply_to(message, f"⚠️ User `{tg_id}` already exists.", parse_mode='Markdown')
+            bot.reply_to(message, f"⚠️ User `{tg_id}` already exists.")
             return
         add_or_update_user(tg_id, name, phone, 'user')
-        bot.reply_to(message, f"✅ User `{tg_id}` added.", parse_mode='Markdown')
-        logger.info(f"Admin {message.from_user.id} added user {tg_id}")
+        bot.reply_to(message, f"✅ User `{tg_id}` added.")
     except Exception as e:
         logger.error(f"Add error: {e}")
-        bot.reply_to(message, "❌ Error adding user.")
+        bot.reply_to(message, "❌ Error.")
 
 @bot.message_handler(commands=['delete'])
 def delete_user_command(message):
     if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ You are not authorized to use this command.")
+        bot.reply_to(message, "⛔ Admin only.")
         return
     try:
         parts = message.text.split()
@@ -563,22 +640,21 @@ def delete_user_command(message):
             return
         tg_id = parts[1].strip()
         if not tg_id.isdigit():
-            bot.reply_to(message, "❌ Invalid Telegram ID.")
+            bot.reply_to(message, "❌ Invalid ID.")
             return
         if not get_user(tg_id):
-            bot.reply_to(message, f"❌ User `{tg_id}` not found.", parse_mode='Markdown')
+            bot.reply_to(message, f"❌ User `{tg_id}` not found.")
             return
         delete_user(tg_id)
-        bot.reply_to(message, f"✅ User `{tg_id}` deleted.", parse_mode='Markdown')
-        logger.info(f"Admin {message.from_user.id} deleted user {tg_id}")
+        bot.reply_to(message, f"✅ User `{tg_id}` deleted.")
     except Exception as e:
         logger.error(f"Delete error: {e}")
-        bot.reply_to(message, "❌ Error deleting user.")
+        bot.reply_to(message, "❌ Error.")
 
 @bot.message_handler(commands=['list'])
 def list_all_users(message):
     if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ This command is for admins only.")
+        bot.reply_to(message, "⛔ Admin only.")
         return
     users = get_all_users()
     if not users:
@@ -586,11 +662,11 @@ def list_all_users(message):
         return
     user_list = users[:10]
     total = len(users)
-    response = f"📋 Showing {len(user_list)} of {total} users\n\n"
+    response = f"📋 Showing {len(user_list)} of {total}\n\n"
     for u in user_list:
         response += f"🆔 `{u['telegram_id']}` - {u['name'] or 'N/A'} ({u['access_level']})\n"
     if total > 10:
-        response += "\n... use /list_full to see all (not implemented)"
+        response += "\n... use /list_full (not implemented)"
     bot.reply_to(message, response, parse_mode='Markdown')
 
 @bot.message_handler(commands=['search'])
@@ -609,7 +685,7 @@ def search_user_command(message):
             response = f"✅ **User Found**\n\n🆔 `{tg_id}`\n👤 {user['name'] or 'N/A'}\n📞 {user['phone'] or 'N/A'}\n🔑 {user['access_level']}"
             bot.reply_to(message, response, parse_mode='Markdown')
         else:
-            bot.reply_to(message, f"❌ User `{tg_id}` not found.", parse_mode='Markdown')
+            bot.reply_to(message, f"❌ User `{tg_id}` not found.")
     except Exception as e:
         logger.error(f"Search error: {e}")
         bot.reply_to(message, "❌ Error.")
@@ -630,7 +706,7 @@ def stats_command(message):
         return
     total_users = get_total_users()
     total_lookups = get_total_lookups()
-    response = f"📊 **Bot Statistics**\n\n👥 Total Users: {total_users}\n🔍 Total Lookups: {total_lookups}\n📦 Cache Size: {len(phone_cache)}"
+    response = f"📊 **Bot Stats**\n\n👥 Users: {total_users}\n🔍 Lookups: {total_lookups}\n📦 Cache: {len(phone_cache)}"
     bot.reply_to(message, response, parse_mode='Markdown')
 
 @bot.message_handler(commands=['export'])
@@ -655,13 +731,12 @@ def export_command(message):
         bot.send_document(message.chat.id, document=('users_export.csv', csv_data), caption="📁 Users export")
         logger.info(f"Admin {message.from_user.id} exported users.")
     except Exception as e:
-        logger.error(f"Export send error: {e}")
+        logger.error(f"Export error: {e}")
         bot.reply_to(message, "❌ Failed to send file.")
 
 # ==================== MAIN ====================
 if __name__ == '__main__':
-    logger.info("Bot started. Commands available.")
-    logger.info("Using NumVerify API key: " + PHONE_API_KEY[:8] + "...")
+    logger.info("Bot started. Using Veriphone, IPQS Phone, and IPQS IP APIs.")
     try:
         bot.infinity_polling()
     except Exception as e:
