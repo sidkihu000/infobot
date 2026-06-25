@@ -1,852 +1,395 @@
 import telebot
 from telebot import types
-import json
 import os
 import re
-import requests
+import json
 import sqlite3
 import logging
+import tempfile
 import time
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
+from io import BytesIO
+from PIL import Image, ImageFilter, ImageDraw
+import requests
+import subprocess
 
-# ==================== LOGGING ===================
+# ==================== CONFIG ====================
+BOT_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"          # Replace with your bot token
+ADMIN_IDS = [2119464081]                    # Replace with admin user IDs
+
+# Gemini API (optional, set via env or .env)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+USE_AI = False
+if GEMINI_API_KEY:
+    import google.generativeai as genai
+    genai.configure(api_key=GEMINI_API_KEY)
+    # Use fast model for quick replies
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    USE_AI = True
+    logger.info("Gemini AI enabled.")
+else:
+    logger.info("Gemini API key not set – using simple responses.")
+
+# ==================== LOGGING ====================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler('musicbot.log'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
-# ==================== ENVIRONMENT & API KEYS ====================
-load_dotenv()
-
-API_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"
-if not API_TOKEN:
-    logger.critical("Bot token missing")
-    raise ValueError("Bot token not set")
-
-# All your API keys (can be overridden via .env file)
-TRUECALLER_API_KEY = os.getenv('TRUECALLER_API_KEY', 'bFPQlc1129809f801461eb218b146cc5ca550')
-VERIPHONE_API_KEY = os.getenv('VERIPHONE_API_KEY', '161EEE47A53242C7B8E11F414B34C23B')
-IPQS_PHONE_API_KEY = os.getenv('IPQS_PHONE_API_KEY', '96d1fa6b388a44d2a789e266593b7d3f')
-IPQS_IP_API_KEY = os.getenv('IPQS_IP_API_KEY', '64b6081d2e6a43ba9b75498b473c7a8e')
-NUMVERIFY_API_KEY = os.getenv('NUMVERIFY_API_KEY', '60762b849a6d6a7cf4f9c63bb68514c0')
-
-# API URLs
-TRUECALLER_API_URL = "https://api.truecaller.com/v1/search"
-VERIPHONE_URL = "https://api.veriphone.io/v2/verify"
-IPQS_PHONE_URL = "https://www.ipqualityscore.com/api/json/phone"
-IPQS_IP_URL = "https://www.ipqualityscore.com/api/json/ip"
-NUMVERIFY_URL = "http://apilayer.net/api/validate"
-
 # ==================== BOT INIT ====================
-bot = telebot.TeleBot(API_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=4)
 
 # ==================== DATABASE ====================
-DB_FILE = 'bot_data.db'
+DB = 'musicbot.db'
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            telegram_id TEXT PRIMARY KEY,
-            name TEXT,
-            phone TEXT,
-            access_level TEXT DEFAULT 'user',
-            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS lookup_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            phone TEXT,
-            result_json TEXT,
-            looked_up_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (telegram_id)
-        )
-    ''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings
+                 (key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS cache
+                 (url TEXT PRIMARY KEY, file_id TEXT, title TEXT, performer TEXT, duration INTEGER)''')
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('video_file_id', '')")
     conn.commit()
     conn.close()
-    logger.info("Database initialized.")
 
-init_db()
-
-def db_connect():
-    return sqlite3.connect(DB_FILE)
-
-def get_user(telegram_id):
-    conn = db_connect()
+def get_setting(key):
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE telegram_id = ?", (str(telegram_id),))
+    c.execute("SELECT value FROM settings WHERE key=?", (key,))
     row = c.fetchone()
     conn.close()
-    if row:
-        return {
-            'telegram_id': row[0],
-            'name': row[1],
-            'phone': row[2],
-            'access_level': row[3],
-            'registered_at': row[4]
-        }
-    return None
+    return row[0] if row else None
 
-def add_or_update_user(telegram_id, name=None, phone=None, access_level='user'):
-    conn = db_connect()
+def set_setting(key, value):
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
-    existing = get_user(telegram_id)
-    if existing:
-        c.execute('''UPDATE users SET name = COALESCE(?, name),
-                     phone = COALESCE(?, phone), access_level = ?
-                     WHERE telegram_id = ?''',
-                  (name, phone, access_level, str(telegram_id)))
-    else:
-        c.execute('''INSERT INTO users (telegram_id, name, phone, access_level)
-                     VALUES (?, ?, ?, ?)''',
-                  (str(telegram_id), name, phone, access_level))
+    c.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
-    logger.info(f"User {telegram_id} added/updated.")
 
-def delete_user(telegram_id):
-    conn = db_connect()
+def get_cached_file(url):
+    conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("DELETE FROM users WHERE telegram_id = ?", (str(telegram_id),))
-    c.execute("DELETE FROM lookup_history WHERE user_id = ?", (str(telegram_id),))
+    c.execute("SELECT file_id, title, performer, duration FROM cache WHERE url=?", (url,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def cache_file(url, file_id, title, performer, duration):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO cache VALUES (?, ?, ?, ?, ?)",
+              (url, file_id, title, performer, duration))
     conn.commit()
     conn.close()
-    logger.info(f"User {telegram_id} deleted.")
 
-def get_all_users():
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute("SELECT telegram_id, name, phone, access_level, registered_at FROM users")
-    rows = c.fetchall()
-    conn.close()
-    return [{'telegram_id': r[0], 'name': r[1], 'phone': r[2],
-             'access_level': r[3], 'registered_at': r[4]} for r in rows]
+# ==================== RATE LIMITER ====================
+user_last_request = {}
+RATE_LIMIT = 1  # seconds between requests
 
-def add_lookup_history(user_id, phone, result):
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''INSERT INTO lookup_history (user_id, phone, result_json)
-                 VALUES (?, ?, ?)''', (str(user_id), phone, json.dumps(result)))
-    conn.commit()
-    conn.close()
-    logger.info(f"Lookup history added for user {user_id}.")
-
-def get_user_history(user_id, limit=5):
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute('''SELECT phone, result_json, looked_up_at FROM lookup_history
-                 WHERE user_id = ? ORDER BY looked_up_at DESC LIMIT ?''',
-              (str(user_id), limit))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def get_total_users():
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users")
-    count = c.fetchone()[0]
-    conn.close()
-    return count
-
-def get_total_lookups():
-    conn = db_connect()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM lookup_history")
-    count = c.fetchone()[0]
-    conn.close()
-    return count
-
-def is_admin(user_id):
-    user = get_user(user_id)
-    return user and user['access_level'] == 'admin'
-
-# ==================== RATE LIMITING ====================
-rate_limit_store = {}
-def is_rate_limited(user_id, limit=10, period=60):
+def is_limited(user_id):
     now = time.time()
-    timestamps = rate_limit_store.get(user_id, [])
-    timestamps = [t for t in timestamps if now - t < period]
-    if len(timestamps) >= limit:
+    if user_id in user_last_request and now - user_last_request[user_id] < RATE_LIMIT:
         return True
-    timestamps.append(now)
-    rate_limit_store[user_id] = timestamps
+    user_last_request[user_id] = now
     return False
 
-# ==================== CACHE ====================
-phone_cache = {}
-CACHE_TTL = 3600
+# ==================== AUDIO HELPERS ====================
+def download_audio(url):
+    """Download best audio from YouTube URL, return bytes and metadata."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        outtmpl = os.path.join(tmpdir, '%(title)s.%(ext)s')
+        cmd = [
+            'yt-dlp',
+            '-f', 'bestaudio[ext=m4a]/bestaudio',
+            '--extract-audio',
+            '--audio-format', 'm4a',
+            '--output', outtmpl,
+            '--print', 'title',
+            '--print', 'uploader',
+            '--print', 'duration',
+            url
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise Exception("yt-dlp failed")
+        lines = result.stdout.strip().split('\n')
+        title = lines[-3] if len(lines) >= 3 else "Unknown"
+        uploader = lines[-2] if len(lines) >= 2 else "Unknown"
+        duration = int(lines[-1]) if lines[-1].isdigit() else 0
+        files = os.listdir(tmpdir)
+        audio_file = next((f for f in files if f.endswith('.m4a')), None)
+        if not audio_file:
+            raise Exception("No audio file")
+        with open(os.path.join(tmpdir, audio_file), 'rb') as f:
+            audio_data = f.read()
+        return audio_data, title, uploader, duration
 
-def get_cached_lookup(phone):
-    if phone in phone_cache:
-        data, timestamp = phone_cache[phone]
-        if time.time() - timestamp < CACHE_TTL:
-            return data
-        else:
-            del phone_cache[phone]
-    return None
-
-def set_cached_lookup(phone, data):
-    phone_cache[phone] = (data, time.time())
-
-# ==================== REAL API CALLS ====================
-
-def truecaller_lookup(phone):
-    """Owner name, address, etc. via Truecaller"""
-    if not TRUECALLER_API_KEY:
-        return None
+def create_glass_thumbnail(thumb_url):
+    """Download thumbnail, apply glass-morphism effect, return BytesIO."""
     try:
-        headers = {
-            'Authorization': f'Bearer {TRUECALLER_API_KEY}',
-            'User-Agent': 'Truecaller/13.57.6 (Android)',
-            'Accept': 'application/json'
-        }
-        params = {'q': phone, 'countryCode': '', 'type': 1}
-        resp = requests.get(TRUECALLER_API_URL, headers=headers, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        # Truecaller can return a list or a dict; we take the first result.
-        if isinstance(data, list) and len(data) > 0:
-            entry = data[0]
-            return {
-                'name': entry.get('name', ''),
-                'alternate_names': entry.get('alternateNames', []),
-                'address': entry.get('address', ''),
-                'city': entry.get('city', ''),
-                'country': entry.get('country', ''),
-                'carrier': entry.get('carrier', ''),
-                'line_type': entry.get('lineType', ''),
-                'ip': entry.get('ip', ''),
-                'isp': entry.get('isp', ''),
-                'latitude': entry.get('latitude'),
-                'longitude': entry.get('longitude')
-            }
-        elif isinstance(data, dict):
-            return {
-                'name': data.get('name', ''),
-                'alternate_names': data.get('alternateNames', []),
-                'address': data.get('address', ''),
-                'city': data.get('city', ''),
-                'country': data.get('country', ''),
-                'carrier': data.get('carrier', ''),
-                'line_type': data.get('lineType', ''),
-                'ip': data.get('ip', ''),
-                'isp': data.get('isp', ''),
-                'latitude': data.get('latitude'),
-                'longitude': data.get('longitude')
-            }
-        return None
+        resp = requests.get(thumb_url, timeout=5)
+        img = Image.open(BytesIO(resp.content)).convert('RGB')
+        img = img.resize((320, 320), Image.LANCZOS)
+        blurred = img.filter(ImageFilter.GaussianBlur(radius=12))
+        overlay = Image.new('RGBA', (320, 320), (255, 255, 255, 80))
+        glass = Image.alpha_composite(blurred.convert('RGBA'), overlay)
+        draw = ImageDraw.Draw(glass)
+        draw.rounded_rectangle([(2,2),(317,317)], outline=(255,255,255,100), width=3, radius=20)
+        bio = BytesIO()
+        glass.save(bio, 'PNG')
+        bio.seek(0)
+        return bio
     except Exception as e:
-        logger.error(f"Truecaller API error: {e}")
+        logger.error(f"Thumbnail error: {e}")
         return None
 
-def numverify_lookup(phone):
+# ==================== SONG SEARCH & SEND ====================
+def search_songs(query, limit=5):
+    """Return list of dicts with title, uploader, url, duration, thumbnail."""
+    cmd = ['yt-dlp', f'ytsearch{limit}:{query}', '--flat-playlist', '--dump-json', '--no-warnings']
     try:
-        params = {'access_key': NUMVERIFY_API_KEY, 'number': phone, 'format': 1}
-        resp = requests.get(NUMVERIFY_URL, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get('valid'):
-            return {
-                'valid': True,
-                'country': data.get('country_name', ''),
-                'carrier': data.get('carrier', ''),
-                'line_type': data.get('line_type', ''),
-                'location': data.get('location', '')
-            }
-        return {'valid': False}
-    except Exception as e:
-        logger.error(f"NumVerify error: {e}")
-        return None
-
-def veriphone_lookup(phone):
-    try:
-        params = {'key': VERIPHONE_API_KEY, 'phone': phone}
-        resp = requests.get(VERIPHONE_URL, params=params, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        return {
-            'valid': data.get('phone_valid', False),
-            'country': data.get('country', ''),
-            'carrier': data.get('carrier', ''),
-            'line_type': data.get('phone_type', '')
-        }
-    except Exception as e:
-        logger.error(f"Veriphone error: {e}")
-        return None
-
-def ipqs_phone_lookup(phone):
-    try:
-        url = f"{IPQS_PHONE_URL}/{IPQS_PHONE_API_KEY}/{phone}"
-        resp = requests.get(url, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get('success'):
-            return None
-        return {
-            'valid': True,
-            'carrier': data.get('carrier', ''),
-            'line_type': data.get('line_type', ''),
-            'country': data.get('country', ''),
-            'city': data.get('city', ''),
-            'region': data.get('region', ''),
-            'zip_code': data.get('zip_code', ''),
-            'latitude': data.get('latitude'),
-            'longitude': data.get('longitude'),
-            'fraud_score': data.get('fraud_score', 0),
-            'isp': data.get('isp', '')
-        }
-    except Exception as e:
-        logger.error(f"IPQS Phone error: {e}")
-        return None
-
-def ipqs_ip_lookup(ip):
-    try:
-        url = f"{IPQS_IP_URL}/{IPQS_IP_API_KEY}/{ip}"
-        resp = requests.get(url, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get('success'):
-            return None
-        return {
-            'ip': ip,
-            'country': data.get('country_code', ''),
-            'city': data.get('city', ''),
-            'region': data.get('region', ''),
-            'isp': data.get('ISP', ''),
-            'organization': data.get('organization', ''),
-            'latitude': data.get('latitude'),
-            'longitude': data.get('longitude'),
-            'fraud_score': data.get('fraud_score', 0),
-            'proxy': data.get('proxy', False),
-            'vpn': data.get('vpn', False),
-            'tor': data.get('tor', False)
-        }
-    except Exception as e:
-        logger.error(f"IPQS IP error: {e}")
-        return None
-
-# ==================== COMBINED PHONE LOOKUP ====================
-def lookup_phone_number(phone):
-    phone = re.sub(r'\s+', '', phone)
-    if not phone.startswith('+'):
-        phone = '+' + phone
-
-    cached = get_cached_lookup(phone)
-    if cached:
-        return cached
-
-    # 1. Truecaller – primary for owner name/address
-    tc_data = truecaller_lookup(phone)
-
-    # 2. Enrichment APIs
-    num = numverify_lookup(phone)
-    veri = veriphone_lookup(phone)
-    ipqs = ipqs_phone_lookup(phone)
-
-    final = {
-        'valid': False,
-        'name': 'N/A',
-        'alternate_names': [],
-        'address': 'N/A',
-        'city': 'N/A',
-        'region': '',
-        'country': 'N/A',
-        'zip_code': '',
-        'carrier': 'N/A',
-        'line_type': 'N/A',
-        'ip': '',
-        'isp': '',
-        'latitude': None,
-        'longitude': None,
-        'fraud_score': None
-    }
-
-    if tc_data:
-        final['valid'] = True
-        final['name'] = tc_data.get('name') or 'N/A'
-        final['alternate_names'] = tc_data.get('alternate_names', [])
-        final['address'] = tc_data.get('address') or 'N/A'
-        final['city'] = tc_data.get('city') or 'N/A'
-        final['country'] = tc_data.get('country') or 'N/A'
-        final['carrier'] = tc_data.get('carrier') or 'N/A'
-        final['line_type'] = tc_data.get('line_type') or 'N/A'
-        final['ip'] = tc_data.get('ip', '')
-        final['isp'] = tc_data.get('isp', '')
-        final['latitude'] = tc_data.get('latitude')
-        final['longitude'] = tc_data.get('longitude')
-        # Enrich with IPQS/Veriphone where Truecaller may lack details
-        if ipqs:
-            if not final['latitude']: final['latitude'] = ipqs.get('latitude')
-            if not final['longitude']: final['longitude'] = ipqs.get('longitude')
-            final['fraud_score'] = ipqs.get('fraud_score')
-            final['zip_code'] = ipqs.get('zip_code', '')
-            final['region'] = ipqs.get('region', '')
-            if not final['isp']: final['isp'] = ipqs.get('isp', '')
-        if num and not final['country']: final['country'] = num.get('country', '')
-    else:
-        # Fallback chain: IPQS -> Veriphone -> NumVerify
-        if ipqs:
-            final['valid'] = True
-            final['carrier'] = ipqs.get('carrier') or (veri.get('carrier') if veri else (num.get('carrier') if num else 'N/A'))
-            final['line_type'] = ipqs.get('line_type') or (veri.get('line_type') if veri else (num.get('line_type') if num else 'N/A'))
-            final['country'] = ipqs.get('country') or (veri.get('country') if veri else (num.get('country') if num else 'N/A'))
-            final['city'] = ipqs.get('city', '')
-            final['region'] = ipqs.get('region', '')
-            final['zip_code'] = ipqs.get('zip_code', '')
-            final['latitude'] = ipqs.get('latitude')
-            final['longitude'] = ipqs.get('longitude')
-            final['fraud_score'] = ipqs.get('fraud_score')
-            final['isp'] = ipqs.get('isp', '')
-        elif veri and veri.get('valid'):
-            final['valid'] = True
-            final['carrier'] = veri.get('carrier') or (num.get('carrier') if num else 'N/A')
-            final['line_type'] = veri.get('line_type') or (num.get('line_type') if num else 'N/A')
-            final['country'] = veri.get('country') or (num.get('country') if num else 'N/A')
-        elif num and num.get('valid'):
-            final['valid'] = True
-            final['carrier'] = num.get('carrier', 'N/A')
-            final['line_type'] = num.get('line_type', 'N/A')
-            final['country'] = num.get('country', 'N/A')
-        else:
-            final['error'] = 'Number invalid or API unavailable'
-
-    set_cached_lookup(phone, final)
-    return final
-
-def validate_phone_number(phone):
-    phone = re.sub(r'\s+', '', phone)
-    if re.match(r'^\+\d{7,15}$', phone):
-        return phone
-    elif re.match(r'^\d{7,15}$', phone):
-        return '+' + phone
-    return None
-
-# ==================== USER STATE ====================
-user_states = {}
-
-# ==================== BOT COMMANDS ====================
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_info = types.InlineKeyboardButton("ℹ️ Bot Info", callback_data='bot_info')
-    btn_help = types.InlineKeyboardButton("❓ Help", callback_data='help')
-    btn_admin = types.InlineKeyboardButton("👤 Contact Admin", url='https://t.me/Xricx0')
-    btn_website = types.InlineKeyboardButton("🌐 Website", url='https://your-website.com')
-    btn_search = types.InlineKeyboardButton("🔍 Search User", callback_data='search_user')
-    btn_list = types.InlineKeyboardButton("📋 List All Users", callback_data='list_users')
-    btn_lookup = types.InlineKeyboardButton("📞 Lookup Number", callback_data='lookup_number')
-    markup.add(btn_info, btn_help, btn_admin, btn_website, btn_search, btn_list, btn_lookup)
-    bot.reply_to(message,
-        f"Welcome {message.from_user.first_name}!\nChoose an option:",
-        reply_markup=markup
-    )
-    logger.info(f"User {message.from_user.id} started bot.")
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    if call.data == 'bot_info':
-        user_states[call.from_user.id] = 'waiting_for_phone'
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id,
-            "📱 **Phone Number Lookup**\n\n"
-            "Please send me a phone number (international format).\n"
-            "Example: `+1234567890`\n\n"
-            "Type /cancel to cancel.",
-            parse_mode='Markdown'
-        )
-    elif call.data == 'help':
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id,
-            "📚 **Help**\n"
-            "- /start – main menu\n"
-            "- /search <telegram_id> – find user by ID\n"
-            "- /list – all users (admin only)\n"
-            "- /lookup <phone> – full owner info (Truecaller + more)\n"
-            "- /ip <ip> – IP intelligence\n"
-            "- /add <id> <name> <phone> – add user (admin only)\n"
-            "- /delete <id> – remove user (admin only)\n"
-            "- /cancel – cancel pending operation\n"
-            "- /history – your last 5 lookups\n"
-            "- /myinfo – your stored data\n"
-            "- /stats – bot stats (admin only)\n"
-            "- /export – CSV of users (admin only)\n"
-            "- /reset – reset your pending state\n\n"
-            "🔎 **Search by username:** Click 'Search User' and send a Telegram username.",
-            parse_mode='Markdown'
-        )
-    elif call.data == 'search_user':
-        user_states[call.from_user.id] = 'waiting_for_username'
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id,
-            "🔍 **Search User by Telegram Username**\n\n"
-            "Please send the **username** (e.g., `@JohnDoe` or `JohnDoe`).\n"
-            "Type /cancel to cancel.",
-            parse_mode='Markdown'
-        )
-    elif call.data == 'list_users':
-        bot.answer_callback_query(call.id)
-        list_all_users(call.message)
-    elif call.data == 'lookup_number':
-        user_states[call.from_user.id] = 'waiting_for_phone'
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id,
-            "📞 **Phone Number Lookup**\n"
-            "Please send a phone number (international format).",
-            parse_mode='Markdown'
-        )
-
-@bot.message_handler(func=lambda message: True)
-def handle_phone_lookup(message):
-    user_id = message.from_user.id
-
-    if user_states.get(user_id) == 'waiting_for_phone':
-        user_states[user_id] = None
-        if message.text.lower() in ['/cancel', 'cancel', 'stop']:
-            bot.reply_to(message, "❌ Cancelled.")
-            return
-
-        if is_rate_limited(user_id, limit=10, period=60):
-            bot.reply_to(message, "⏳ Rate limit exceeded. Please wait.")
-            return
-
-        phone = validate_phone_number(message.text.strip())
-        if not phone:
-            bot.reply_to(message, "❌ Invalid format. Use e.g., `+1234567890`.", parse_mode='Markdown')
-            return
-
-        try:
-            info = lookup_phone_number(phone)
-            add_lookup_history(user_id, phone, info)
-        except Exception as e:
-            logger.error(f"Lookup error: {e}")
-            bot.reply_to(message, "❌ API error. Try again later.")
-            return
-
-        # Format the response
-        response = f"✅ **Phone Lookup Results**\n\n📞 `{phone}`\n"
-        if not info.get('valid'):
-            response += "❌ **Invalid / not found**\n"
-        else:
-            if info.get('name', 'N/A') != 'N/A':
-                response += f"👤 **Owner:** {info['name']}\n"
-                if info.get('alternate_names'):
-                    response += f"📛 **Also known as:** {', '.join(info['alternate_names'])}\n"
-            response += f"🏠 **Address:** {info.get('address', 'N/A')}\n"
-            loc_parts = [info.get('city', ''), info.get('region', ''), info.get('country', '')]
-            response += f"📍 **Location:** {', '.join(filter(None, loc_parts))}\n"
-            if info.get('zip_code'):
-                response += f"📮 **ZIP:** {info['zip_code']}\n"
-            response += f"📶 **Carrier:** {info.get('carrier', 'N/A')}\n"
-            response += f"📱 **Line Type:** {info.get('line_type', 'N/A')}\n"
-            if info.get('isp'):
-                response += f"🌐 **ISP:** {info['isp']}\n"
-            if info.get('ip'):
-                response += f"🔢 **IP:** `{info['ip']}`\n"
-            if info.get('latitude') and info.get('longitude'):
-                response += f"🗺️ **Coordinates:** {info['latitude']}, {info['longitude']}\n"
-            if info.get('fraud_score') is not None:
-                response += f"⚠️ **Fraud Score:** {info['fraud_score']}/100\n"
-        bot.reply_to(message, response, parse_mode='Markdown')
-        logger.info(f"Lookup performed for user {user_id}, phone {phone}")
-
-    elif user_states.get(user_id) == 'waiting_for_username':
-        user_states[user_id] = None
-        if message.text.lower() in ['/cancel', 'cancel', 'stop']:
-            bot.reply_to(message, "❌ Cancelled.")
-            return
-
-        raw_username = message.text.strip()
-        username = raw_username.lstrip('@')
-        if not username:
-            bot.reply_to(message, "❌ Please provide a valid username.")
-            return
-
-        try:
-            chat = bot.get_chat('@' + username)
-            tg_id = str(chat.id)
-            user = get_user(tg_id)
-            if user and user.get('phone'):
-                bot.reply_to(message,
-                    f"✅ **User Found**\n"
-                    f"👤 @{username}\n"
-                    f"🆔 ID: `{tg_id}`\n"
-                    f"📞 Phone: `{user['phone']}`\n\n"
-                    f"🔍 Use /lookup {user['phone']} for detailed info.",
-                    parse_mode='Markdown')
-            else:
-                bot.reply_to(message,
-                    f"⚠️ @{username} (ID: `{tg_id}`) found, but no phone on file.",
-                    parse_mode='Markdown')
-        except telebot.apihelper.ApiTelegramException as e:
-            if e.error_code == 400 and "chat not found" in str(e).lower():
-                bot.reply_to(message, f"❌ Username @{username} not found.")
-            else:
-                bot.reply_to(message, f"❌ Telegram API error: {e.description}")
-        except Exception as e:
-            logger.error(f"Username lookup error: {e}")
-            bot.reply_to(message, "❌ Unexpected error.")
-        return
-
-    else:
-        if message.text.startswith('/'):
-            allowed_commands = ['/start','/search','/list','/add','/delete','/lookup','/cancel','/history','/myinfo','/stats','/export','/reset','/ip']
-            if message.text.lower() not in allowed_commands:
-                bot.reply_to(message, "❓ Unknown command. Use /start.")
-        else:
-            bot.reply_to(message, "Use /start to see options.")
-
-@bot.message_handler(commands=['lookup'])
-def lookup_command(message):
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /lookup <phone>")
-            return
-
-        if is_rate_limited(message.from_user.id):
-            bot.reply_to(message, "⏳ Rate limit exceeded.")
-            return
-
-        phone = validate_phone_number(parts[1].strip())
-        if not phone:
-            bot.reply_to(message, "❌ Invalid format.")
-            return
-
-        info = lookup_phone_number(phone)
-        add_lookup_history(message.from_user.id, phone, info)
-
-        response = f"✅ **Phone Lookup**\n\n📞 `{phone}`\n"
-        if not info.get('valid'):
-            response += "❌ Invalid / not found\n"
-        else:
-            if info.get('name') != 'N/A':
-                response += f"👤 Owner: {info['name']}\n"
-            response += f"🏠 Address: {info.get('address','N/A')}\n"
-            loc = ', '.join(filter(None, [info.get('city',''), info.get('region',''), info.get('country','')]))
-            response += f"📍 Location: {loc or 'N/A'}\n"
-            if info.get('zip_code'): response += f"📮 ZIP: {info['zip_code']}\n"
-            response += f"📶 Carrier: {info.get('carrier','N/A')}\n"
-            response += f"📱 Line Type: {info.get('line_type','N/A')}\n"
-            if info.get('isp'): response += f"🌐 ISP: {info['isp']}\n"
-            if info.get('ip'): response += f"🔢 IP: `{info['ip']}`\n"
-            if info.get('latitude') and info.get('longitude'):
-                response += f"🗺️ Coordinates: {info['latitude']}, {info['longitude']}\n"
-            if info.get('fraud_score') is not None:
-                response += f"⚠️ Fraud Score: {info['fraud_score']}/100\n"
-        bot.reply_to(message, response, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Lookup command error: {e}")
-        bot.reply_to(message, "❌ Error.")
-
-@bot.message_handler(commands=['ip'])
-def ip_lookup_command(message):
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /ip <ip_address>")
-            return
-        ip = parts[1].strip()
-        if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
-            bot.reply_to(message, "❌ Invalid IP format.")
-            return
-        info = ipqs_ip_lookup(ip)
-        if not info:
-            bot.reply_to(message, "❌ Unable to fetch IP info.")
-            return
-        response = f"🌍 **IP Intelligence**\n\n🔢 `{ip}`\n"
-        response += f"🏳️ Country: {info.get('country','N/A')}\n"
-        response += f"🏙️ City/Region: {info.get('city','N/A')}, {info.get('region','N/A')}\n"
-        response += f"🌐 ISP: {info.get('isp','N/A')}\n"
-        response += f"🏢 Organization: {info.get('organization','N/A')}\n"
-        response += f"🗺️ Coordinates: {info.get('latitude','?')}, {info.get('longitude','?')}\n"
-        response += f"⚠️ Fraud Score: {info.get('fraud_score','?')}/100\n"
-        flags = []
-        if info.get('proxy'): flags.append('Proxy')
-        if info.get('vpn'): flags.append('VPN')
-        if info.get('tor'): flags.append('Tor')
-        if flags:
-            response += f"🚩 Flags: {', '.join(flags)}\n"
-        bot.reply_to(message, response, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"IP lookup error: {e}")
-        bot.reply_to(message, "❌ Error.")
-
-# --- Remaining commands (history, myinfo, etc.) unchanged ---
-@bot.message_handler(commands=['history'])
-def history_command(message):
-    user_id = message.from_user.id
-    rows = get_user_history(user_id, limit=5)
-    if not rows:
-        bot.reply_to(message, "📭 No history.")
-        return
-    response = "📜 **Last 5 lookups:**\n\n"
-    for phone, result_json, looked_up_at in rows:
-        result = json.loads(result_json)
-        response += f"📞 `{phone}` – {result.get('name','N/A')} ({result.get('country','?')})\n"
-        response += f"   🕒 {looked_up_at}\n\n"
-    bot.reply_to(message, response, parse_mode='Markdown')
-
-@bot.message_handler(commands=['myinfo'])
-def myinfo_command(message):
-    user = get_user(message.from_user.id)
-    if not user:
-        bot.reply_to(message, "ℹ️ Not registered.")
-        return
-    response = f"👤 **Your Info**\n\n🆔 `{user['telegram_id']}`\n👤 {user['name'] or 'N/A'}\n📞 {user['phone'] or 'N/A'}\n🔑 {user['access_level']}\n📅 {user['registered_at']}"
-    bot.reply_to(message, response, parse_mode='Markdown')
-
-@bot.message_handler(commands=['reset'])
-def reset_command(message):
-    user_id = message.from_user.id
-    if user_states.get(user_id) in ('waiting_for_phone', 'waiting_for_username'):
-        user_states[user_id] = None
-        bot.reply_to(message, "✅ Reset.")
-    else:
-        bot.reply_to(message, "ℹ️ Nothing to reset.")
-
-@bot.message_handler(commands=['add'])
-def add_user_command(message):
-    if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ Admin only.")
-        return
-    try:
-        parts = message.text.split()
-        if len(parts) < 4:
-            bot.reply_to(message, "Usage: /add <telegram_id> <name> <phone>")
-            return
-        tg_id, name, phone = parts[1].strip(), parts[2].strip(), parts[3].strip()
-        if not tg_id.isdigit():
-            bot.reply_to(message, "❌ Invalid ID.")
-            return
-        if get_user(tg_id):
-            bot.reply_to(message, f"⚠️ User `{tg_id}` already exists.")
-            return
-        add_or_update_user(tg_id, name, phone, 'user')
-        bot.reply_to(message, f"✅ User `{tg_id}` added.")
-    except Exception as e:
-        logger.error(f"Add error: {e}")
-        bot.reply_to(message, "❌ Error.")
-
-@bot.message_handler(commands=['delete'])
-def delete_user_command(message):
-    if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ Admin only.")
-        return
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /delete <telegram_id>")
-            return
-        tg_id = parts[1].strip()
-        if not tg_id.isdigit():
-            bot.reply_to(message, "❌ Invalid ID.")
-            return
-        if not get_user(tg_id):
-            bot.reply_to(message, f"❌ User `{tg_id}` not found.")
-            return
-        delete_user(tg_id)
-        bot.reply_to(message, f"✅ User `{tg_id}` deleted.")
-    except Exception as e:
-        logger.error(f"Delete error: {e}")
-        bot.reply_to(message, "❌ Error.")
-
-@bot.message_handler(commands=['list'])
-def list_all_users(message):
-    if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ Admin only.")
-        return
-    users = get_all_users()
-    if not users:
-        bot.reply_to(message, "📭 No users.")
-        return
-    user_list = users[:10]
-    total = len(users)
-    response = f"📋 Showing {len(user_list)} of {total}\n\n"
-    for u in user_list:
-        response += f"🆔 `{u['telegram_id']}` - {u['name'] or 'N/A'} ({u['access_level']})\n"
-    if total > 10:
-        response += "\n... /list_full (not implemented)"
-    bot.reply_to(message, response, parse_mode='Markdown')
-
-@bot.message_handler(commands=['search'])
-def search_user_command(message):
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /search <telegram_id>")
-            return
-        tg_id = parts[1].strip()
-        if not tg_id.isdigit():
-            bot.reply_to(message, "❌ Invalid ID.")
-            return
-        user = get_user(tg_id)
-        if user:
-            response = f"✅ **User Found**\n\n🆔 `{tg_id}`\n👤 {user['name'] or 'N/A'}\n📞 {user['phone'] or 'N/A'}\n🔑 {user['access_level']}"
-            bot.reply_to(message, response, parse_mode='Markdown')
-        else:
-            bot.reply_to(message, f"❌ User `{tg_id}` not found.")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        entries = []
+        for line in result.stdout.strip().split('\n'):
+            if line:
+                data = json.loads(line)
+                vid = data.get('id')
+                url = f'https://youtu.be/{vid}' if vid else data.get('webpage_url', '')
+                title = data.get('title', 'Unknown')
+                uploader = data.get('uploader', data.get('channel', 'Unknown'))
+                duration = data.get('duration', 0) or 0
+                thumb = (data.get('thumbnails', [{}])[-1].get('url', '') if data.get('thumbnails') else '')
+                entries.append({
+                    'title': title,
+                    'uploader': uploader,
+                    'url': url,
+                    'duration': duration,
+                    'thumb': thumb
+                })
+        return entries
     except Exception as e:
         logger.error(f"Search error: {e}")
-        bot.reply_to(message, "❌ Error.")
+        return []
 
-@bot.message_handler(commands=['cancel'])
-def cancel_command(message):
-    user_id = message.from_user.id
-    if user_states.get(user_id) in ('waiting_for_phone', 'waiting_for_username'):
-        user_states[user_id] = None
-        bot.reply_to(message, "✅ Cancelled.")
-    else:
-        bot.reply_to(message, "ℹ️ No active operation.")
+def send_audio(chat_id, url, reply_to=None):
+    """Download audio from URL and send to chat with glass thumbnail."""
+    cached = get_cached_file(url)
+    if cached:
+        file_id, title, performer, duration = cached
+        try:
+            bot.send_audio(chat_id, file_id, caption=f"🎵 {title} - {performer}", reply_to_message_id=reply_to)
+            return
+        except:
+            pass  # re‑download if file id expired
 
-@bot.message_handler(commands=['stats'])
-def stats_command(message):
-    if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ Admin only.")
-        return
-    total_users = get_total_users()
-    total_lookups = get_total_lookups()
-    response = f"📊 **Bot Stats**\n\n👥 Users: {total_users}\n🔍 Lookups: {total_lookups}\n📦 Cache: {len(phone_cache)}"
-    bot.reply_to(message, response, parse_mode='Markdown')
-
-@bot.message_handler(commands=['export'])
-def export_command(message):
-    if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ Admin only.")
-        return
-    users = get_all_users()
-    if not users:
-        bot.reply_to(message, "No users to export.")
-        return
-    import io
-    import csv
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['Telegram ID', 'Name', 'Phone', 'Access Level', 'Registered At'])
-    for u in users:
-        writer.writerow([u['telegram_id'], u['name'], u['phone'], u['access_level'], u['registered_at']])
-    csv_data = output.getvalue()
-    output.close()
     try:
-        bot.send_document(message.chat.id, document=('users_export.csv', csv_data), caption="📁 Users export")
-        logger.info(f"Admin {message.from_user.id} exported users.")
+        audio_data, title, uploader, duration = download_audio(url)
     except Exception as e:
-        logger.error(f"Export error: {e}")
-        bot.reply_to(message, "❌ Failed to send file.")
+        logger.error(f"Download failed: {e}")
+        bot.send_message(chat_id, "❌ Failed to download the audio.")
+        return
+
+    thumb_url = f"https://i.ytimg.com/vi/{url.split('v=')[-1]}/hqdefault.jpg"
+    thumb_io = create_glass_thumbnail(thumb_url)
+
+    audio_file = BytesIO(audio_data)
+    audio_file.name = f"{title}.m4a"
+    msg = bot.send_audio(
+        chat_id,
+        audio_file,
+        caption=f"🎵 {title} - {uploader}",
+        duration=duration,
+        performer=uploader,
+        title=title,
+        thumb=thumb_io,
+        reply_to_message_id=reply_to
+    )
+    if msg.audio:
+        cache_file(url, msg.audio.file_id, title, uploader, duration)
+    logger.info(f"Sent audio: {title}")
+
+# ==================== AI CHAT (Gemini) ====================
+def ai_chat(user_name, user_message):
+    """Generate a conversational reply using Gemini, keeping context small."""
+    if not USE_AI:
+        return None  # fallback to simple rules
+    prompt = f"""You are a friendly Hindi/English music assistant bot.
+User name: {user_name}
+User says: {user_message}
+Reply naturally in Hinglish or English, and keep it short.
+If the user asks for a song or music, say something like "Main aapke liye gaana dhundh raha hoon!".
+Now reply:"""
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+        return None
+
+def simple_reply(user_name, text):
+    """Fallback rule-based replies when AI is disabled."""
+    text_lower = text.lower()
+    if any(kw in text_lower for kw in ['song', 'gaana', 'gana', 'play', 'music', 'geet']):
+        # Extract possible song name after keywords
+        song = re.sub(r'(play|search|song|gaana|gana|music|geet)', '', text, flags=re.IGNORECASE).strip()
+        if song:
+            return f"🎵 Main aapke liye **{song}** dhundh raha hoon !!"
+        return "🎵 Aapko kaunsa gaana chahiye?"
+    return f"Hello {user_name}, main aapki kya madad kar sakta hoon? 🎶"
+
+# ==================== INLINE QUERIES (for fast search) ====================
+@bot.inline_handler(lambda query: len(query.query) > 0)
+def inline_search(inline_query):
+    if is_limited(inline_query.from_user.id):
+        return
+    q = inline_query.query
+    entries = search_songs(q, 5)
+    results = []
+    for idx, entry in enumerate(entries):
+        duration_str = f"{entry['duration']//60}:{entry['duration']%60:02d}"
+        results.append(types.InlineQueryResultArticle(
+            id=str(idx),
+            title=entry['title'],
+            description=f"{entry['uploader']} • {duration_str}",
+            input_message_content=types.InputTextMessageContent(
+                f"🔍 {entry['title']} - {entry['uploader']}"
+            ),
+            thumb_url=entry['thumb'],
+            thumb_width=48, thumb_height=48
+        ))
+    bot.answer_inline_query(inline_query.id, results, cache_time=5)
+
+@bot.chosen_inline_handler(func=lambda chosen_inline_result: True)
+def chosen_inline(chosen_result):
+    query = chosen_result.query
+    entries = search_songs(query, 1)
+    if entries:
+        send_audio(chosen_result.from_user.id, entries[0]['url'])
+
+# ==================== COMMAND HANDLERS ====================
+@bot.message_handler(commands=['start'])
+def start(message):
+    first_name = message.from_user.first_name
+    # Send admin video frame (if set)
+    video_id = get_setting('video_file_id')
+    if video_id:
+        bot.send_video(message.chat.id, video_id, caption="🎬 Welcome to Music Bot!")
+
+    # AI or simple greeting
+    greeting = ai_chat(first_name, "/start") if USE_AI else simple_reply(first_name, "hello")
+    if not greeting:
+        greeting = f"Hey {first_name}, how can I help you? 🎵"
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🔍 Search", switch_inline_query_current_chat=""),
+        types.InlineKeyboardButton("❓ Help", callback_data='help')
+    )
+    bot.send_message(message.chat.id, greeting, reply_markup=markup, parse_mode='Markdown')
+
+@bot.message_handler(commands=['search'])
+def search_cmd(message):
+    query = message.text.split(' ', 1)[1] if len(message.text.split()) > 1 else ''
+    if not query:
+        bot.reply_to(message, "Usage: /search <song name>")
+        return
+    entries = search_songs(query, 5)
+    if not entries:
+        bot.reply_to(message, "No results.")
+        return
+    markup = types.InlineKeyboardMarkup()
+    for entry in entries:
+        markup.add(types.InlineKeyboardButton(
+            f"{entry['title'][:50]}", callback_data=f"play:{entry['url']}"
+        ))
+    # Let AI respond conversationally as well
+    reply_text = ai_chat(message.from_user.first_name, query) if USE_AI else simple_reply(message.from_user.first_name, query)
+    if reply_text:
+        bot.reply_to(message, reply_text)
+    bot.send_message(message.chat.id, "🎵 Search results:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('play:'))
+def play_callback(call):
+    if is_limited(call.from_user.id):
+        bot.answer_callback_query(call.id, "Too fast!")
+        return
+    url = call.data.split('play:')[1]
+    bot.answer_callback_query(call.id, "Downloading...")
+    send_audio(call.message.chat.id, url, reply_to=call.message.message_id)
+
+# ==================== NATURAL LANGUAGE SONG REQUEST ====================
+@bot.message_handler(func=lambda m: True, content_types=['text'])
+def handle_text(message):
+    # Skip commands
+    if message.text.startswith('/'):
+        return  # commands are handled separately
+
+    user_id = message.from_user.id
+    if is_limited(user_id):
+        return
+
+    first_name = message.from_user.first_name
+    text = message.text.strip()
+
+    # 1. Try AI reply
+    ai_reply = ai_chat(first_name, text) if USE_AI else None
+
+    # 2. Detect if it's a song request
+    song_keywords = ['song', 'gaana', 'gana', 'play', 'music', 'geet', 'bajao', 'suno']
+    is_song_request = any(kw in text.lower() for kw in song_keywords)
+
+    if is_song_request:
+        # Extract potential song name
+        cleaned = re.sub('|'.join(song_keywords), '', text, flags=re.IGNORECASE).strip()
+        if not cleaned:
+            cleaned = text  # fallback
+        # Reply with AI or fixed phrase
+        if ai_reply:
+            reply = ai_reply
+        else:
+            reply = f"🎵 Main aapke liye **{cleaned}** dhundh raha hoon !!"
+        bot.reply_to(message, reply, parse_mode='Markdown')
+        # Perform search and send the first result
+        entries = search_songs(cleaned, 1)
+        if entries:
+            send_audio(message.chat.id, entries[0]['url'], reply_to=message.message_id)
+        else:
+            bot.reply_to(message, "❌ Koi result nahi mila.")
+    else:
+        # Not a song request – just chat
+        if ai_reply:
+            bot.reply_to(message, ai_reply)
+        else:
+            bot.reply_to(message, simple_reply(first_name, text))
+
+@bot.message_handler(commands=['set_video'])
+def set_video(message):
+    if message.from_user.id not in ADMIN_IDS:
+        bot.reply_to(message, "⛔ Admin only.")
+        return
+    if not message.reply_to_message or not message.reply_to_message.video:
+        bot.reply_to(message, "Reply to a video with /set_video to set it.")
+        return
+    file_id = message.reply_to_message.video.file_id
+    set_setting('video_file_id', file_id)
+    bot.reply_to(message, "✅ Video frame updated!")
+
+@bot.message_handler(commands=['help'])
+def help_cmd(message):
+    bot.reply_to(message,
+        "📖 **Music Bot Help**\n"
+        "• Say `play <song>` or just type a song name.\n"
+        "• /search <song> – list results\n"
+        "• Inline search: `@botusername song`\n"
+        "• /set_video – admin only, set a welcome video\n"
+        "• I speak Hindi & English 😊",
+        parse_mode='Markdown')
 
 # ==================== MAIN ====================
 if __name__ == '__main__':
-    logger.info("Bot started. Truecaller + IPQS + Veriphone + NumVerify integrated.")
-    try:
-        bot.infinity_polling()
-    except Exception as e:
-        logger.critical(f"Bot crashed: {e}")
+    init_db()
+    logger.info("Music bot started.")
+    bot.infinity_polling()
