@@ -13,7 +13,7 @@ import requests
 import subprocess
 
 # ==================== CONFIG ====================
-BOT_TOKEN = "8637135798:AAEFWvxhmUuylfg6yJ4u3nQya_J8yp33VUg"
+BOT_TOKEN = "7096730412:AAHhv6RLDMW_WXfo2QMUuEdRRRTrAMOTsn0"
 ADMIN_IDS = [2119464081]
 
 # ==================== LOGGING ====================
