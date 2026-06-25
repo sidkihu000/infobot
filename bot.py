@@ -332,7 +332,7 @@ def handle_callback(call):
         bot.send_message(call.message.chat.id,
             "📚 **Help**\n"
             "- /start – main menu\n"
-            "- /search <telegram_id> – find user\n"
+            "- /search <telegram_id> – find user by ID\n"
             "- /list – all users (admin only)\n"
             "- /lookup <phone> – phone info\n"
             "- /add <id> <name> <phone> – add user (admin only)\n"
@@ -342,18 +342,19 @@ def handle_callback(call):
             "- /myinfo – your stored data\n"
             "- /stats – bot stats (admin only)\n"
             "- /export – CSV of users (admin only)\n"
-            "- /reset – reset your pending state",
+            "- /reset – reset your pending state\n\n"
+            "🔎 **New:** Click 'Search User' to find a phone number by Telegram username.",
             parse_mode='Markdown'
         )
     # =========================================================
-    # MODIFIED: search_user callback now asks for a username
+    # ENHANCED: search_user callback – now uses Telegram API
     # =========================================================
     elif call.data == 'search_user':
         user_states[call.from_user.id] = 'waiting_for_username'
         bot.answer_callback_query(call.id)
         bot.send_message(call.message.chat.id,
-            "🔍 **Search User by Username**\n\n"
-            "Please send me the username you want to look up.\n"
+            "🔍 **Search User by Telegram Username**\n\n"
+            "Please send the **username** (e.g., `@JohnDoe` or `JohnDoe`).\n"
             "Type /cancel to cancel.",
             parse_mode='Markdown'
         )
@@ -408,7 +409,7 @@ def handle_phone_lookup(message):
         logger.info(f"Lookup performed for user {user_id}, phone {phone}")
 
     # =========================================================
-    # ADDED: username lookup state
+    # NEW: username lookup state using Telegram API + database
     # =========================================================
     elif user_states.get(user_id) == 'waiting_for_username':
         user_states[user_id] = None
@@ -416,22 +417,41 @@ def handle_phone_lookup(message):
             bot.reply_to(message, "❌ Cancelled.")
             return
 
-        username = message.text.strip()
-        # Search the database for a user whose name matches (case-insensitive)
-        conn = db_connect()
-        c = conn.cursor()
-        c.execute("SELECT phone FROM users WHERE LOWER(name) = LOWER(?)", (username,))
-        row = c.fetchone()
-        conn.close()
+        raw_username = message.text.strip()
+        # Remove leading @ if present
+        username = raw_username.lstrip('@')
 
-        if row and row[0]:
-            bot.reply_to(message,
-                f"📞 Phone number for **{username}**: `{row[0]}`",
-                parse_mode='Markdown')
-        else:
-            bot.reply_to(message,
-                f"❌ No user found with username **{username}**.",
-                parse_mode='Markdown')
+        if not username:
+            bot.reply_to(message, "❌ Please provide a valid username.")
+            return
+
+        try:
+            # Attempt to resolve the username to a Telegram user ID
+            # bot.get_chat('@username') works if the user has ever started a chat with the bot
+            chat = bot.get_chat('@' + username)
+            tg_id = str(chat.id)
+
+            # Look up in our database
+            user = get_user(tg_id)
+            if user and user.get('phone'):
+                bot.reply_to(message,
+                    f"✅ **User Found**\n"
+                    f"👤 **Username:** @{username}\n"
+                    f"🆔 **Telegram ID:** `{tg_id}`\n"
+                    f"📞 **Phone:** `{user['phone']}`",
+                    parse_mode='Markdown')
+            else:
+                bot.reply_to(message,
+                    f"⚠️ @{username} (ID: `{tg_id}`) is known to Telegram, but we have no phone number on file for them.",
+                    parse_mode='Markdown')
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code == 400 and "chat not found" in str(e).lower():
+                bot.reply_to(message, f"❌ Username @{username} not found or the bot hasn’t interacted with them.")
+            else:
+                bot.reply_to(message, f"❌ Telegram API error: {e.description}")
+        except Exception as e:
+            logger.error(f"Username lookup error: {e}")
+            bot.reply_to(message, "❌ An unexpected error occurred.")
         return
 
     # Fallback for unknown commands or messages
@@ -498,7 +518,7 @@ def myinfo_command(message):
 @bot.message_handler(commands=['reset'])
 def reset_command(message):
     user_id = message.from_user.id
-    if user_states.get(user_id) == 'waiting_for_phone':
+    if user_states.get(user_id) in ('waiting_for_phone', 'waiting_for_username'):
         user_states[user_id] = None
         bot.reply_to(message, "✅ Your pending state has been reset.")
     else:
@@ -594,9 +614,6 @@ def search_user_command(message):
         logger.error(f"Search error: {e}")
         bot.reply_to(message, "❌ Error.")
 
-# =========================================================
-# MODIFIED: /cancel now clears both possible states
-# =========================================================
 @bot.message_handler(commands=['cancel'])
 def cancel_command(message):
     user_id = message.from_user.id
