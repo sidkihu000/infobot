@@ -16,8 +16,7 @@ import subprocess
 BOT_TOKEN = "6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU"
 ADMIN_IDS = [2119464081]
 
-# ==================== COOKIES FILE (for YouTube authentication) ====================
-COOKIES_FILE = "cookies.txt"   # Place this file in your project folder
+COOKIES_FILE = "cookies.txt"   # YouTube login cookies
 
 # ==================== LOGGING ====================
 logging.basicConfig(
@@ -27,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== GEMINI AI SETUP ====================
+# ==================== GEMINI AI ====================
 GEMINI_API_KEY = "AIzaSyAXERqkAEErXF7-4qSlap6tO9QSSmJmpf0"
 USE_AI = False
 if GEMINI_API_KEY:
@@ -107,13 +106,13 @@ def is_limited(user_id):
     user_last_request[user_id] = now
     return False
 
-# ==================== AUDIO DOWNLOAD (with cookies) ====================
+# ==================== AUDIO DOWNLOAD (FIXED FORMAT) ====================
 def download_audio(url):
     with tempfile.TemporaryDirectory() as tmpdir:
         outtmpl = os.path.join(tmpdir, '%(title)s.%(ext)s')
         cmd = [
             'yt-dlp',
-            '-f', 'bestaudio[ext=m4a]/bestaudio',
+            '-f', 'bestaudio',          # Removed [ext=m4a] to avoid missing format error
             '--extract-audio',
             '--audio-format', 'm4a',
             '--output', outtmpl,
@@ -123,13 +122,12 @@ def download_audio(url):
             '--no-playlist',
             url
         ]
-        # Use cookies file if it exists (for logged-in session)
         if os.path.isfile(COOKIES_FILE):
             cmd.insert(1, '--cookies')
             cmd.insert(2, COOKIES_FILE)
-            logger.info("Using cookies file for yt-dlp.")
+            logger.info("Using cookies.txt for yt-dlp.")
         else:
-            logger.warning("No cookies file found – may hit bot detection.")
+            logger.warning("cookies.txt not found – may hit bot detection.")
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
@@ -165,7 +163,6 @@ def create_glass_thumbnail(thumb_url):
         logger.error(f"Thumbnail error: {e}")
         return None
 
-# ==================== SONG SEARCH ====================
 def search_songs(query, limit=5):
     cmd = ['yt-dlp', f'ytsearch{limit}:{query}', '--flat-playlist', '--dump-json', '--no-warnings']
     if os.path.isfile(COOKIES_FILE):
@@ -213,7 +210,6 @@ def send_audio(chat_id, url, reply_to=None):
         bot.send_message(chat_id, f"❌ Failed to download.\n\n`{error_msg}`", parse_mode='Markdown')
         return
 
-    # Thumbnail
     thumb_url = ""
     if 'youtu' in url:
         vid = url.split('v=')[-1].split('&')[0] if 'v=' in url else url.split('/')[-1]
