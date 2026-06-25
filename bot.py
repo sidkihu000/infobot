@@ -24,16 +24,16 @@ logger = logging.getLogger(__name__)
 
 # ==================== ENVIRONMENT VARIABLES ====================
 load_dotenv()
-API_TOKEN = os.getenv('8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A')
-if not API_TOKEN:
-    logger.critical("8637135798:AAEdTzCnL3fn1keuLzLxQN0BUULXlTMicVY")
-    raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
 
-# ---- USE YOUR PROVIDED API KEY DIRECTLY ----
-# If you prefer, you can still set NUMVERIFY_API_KEY in .env to override this.
+# --- Bot token (hardcoded – only for development!) ---
+API_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"
+if not API_TOKEN:
+    logger.critical("Bot token is missing")
+    raise ValueError("Bot token not set")
+
+# --- NumVerify API key (still loaded from env or fallback) ---
 PHONE_API_KEY = os.getenv('NUMVERIFY_API_KEY', '60762b849a6d6a7cf4f9c63bb68514c0')
 PHONE_API_URL = 'http://apilayer.net/api/validate'
-
 # ==================== BOT INIT ====================
 bot = telebot.TeleBot(API_TOKEN)
 
