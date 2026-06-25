@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 from dotenv import load_dotenv
 
-# ==================== LOGGING SETUP ====================
+# ==================== LOGGING SETUP ===================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
