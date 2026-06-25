@@ -1,1 +1,2 @@
-pip install pyTelegramBotAPI yt-dlp Pillow requests
+pip install pyTelegramBotAPI 
+yt-dlp Pillow requests
