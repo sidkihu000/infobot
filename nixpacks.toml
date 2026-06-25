@@ -1,0 +1,4 @@
+[packages]
+ffmpeg = "latest"
+sudo apt install ffmpeg   # Ubuntu/Debian
+brew install ffmpeg       # macOS
