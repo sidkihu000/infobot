@@ -34,6 +34,7 @@ if not API_TOKEN:
 # --- NumVerify API key (still loaded from env or fallback) ---
 PHONE_API_KEY = os.getenv('NUMVERIFY_API_KEY', '60762b849a6d6a7cf4f9c63bb68514c0')
 PHONE_API_URL = 'http://apilayer.net/api/validate'
+
 # ==================== BOT INIT ====================
 bot = telebot.TeleBot(API_TOKEN)
 
@@ -344,11 +345,16 @@ def handle_callback(call):
             "- /reset – reset your pending state",
             parse_mode='Markdown'
         )
+    # =========================================================
+    # MODIFIED: search_user callback now asks for a username
+    # =========================================================
     elif call.data == 'search_user':
+        user_states[call.from_user.id] = 'waiting_for_username'
         bot.answer_callback_query(call.id)
         bot.send_message(call.message.chat.id,
-            "🔍 **Search User**\n"
-            "Usage: /search <telegram_id>",
+            "🔍 **Search User by Username**\n\n"
+            "Please send me the username you want to look up.\n"
+            "Type /cancel to cancel.",
             parse_mode='Markdown'
         )
     elif call.data == 'list_users':
@@ -366,6 +372,8 @@ def handle_callback(call):
 @bot.message_handler(func=lambda message: True)
 def handle_phone_lookup(message):
     user_id = message.from_user.id
+
+    # Original phone lookup state
     if user_states.get(user_id) == 'waiting_for_phone':
         user_states[user_id] = None
         if message.text.lower() in ['/cancel', 'cancel', 'stop']:
@@ -398,6 +406,35 @@ def handle_phone_lookup(message):
         response += f"📱 **Line Type:** {info.get('line_type', 'N/A')}"
         bot.reply_to(message, response, parse_mode='Markdown')
         logger.info(f"Lookup performed for user {user_id}, phone {phone}")
+
+    # =========================================================
+    # ADDED: username lookup state
+    # =========================================================
+    elif user_states.get(user_id) == 'waiting_for_username':
+        user_states[user_id] = None
+        if message.text.lower() in ['/cancel', 'cancel', 'stop']:
+            bot.reply_to(message, "❌ Cancelled.")
+            return
+
+        username = message.text.strip()
+        # Search the database for a user whose name matches (case-insensitive)
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("SELECT phone FROM users WHERE LOWER(name) = LOWER(?)", (username,))
+        row = c.fetchone()
+        conn.close()
+
+        if row and row[0]:
+            bot.reply_to(message,
+                f"📞 Phone number for **{username}**: `{row[0]}`",
+                parse_mode='Markdown')
+        else:
+            bot.reply_to(message,
+                f"❌ No user found with username **{username}**.",
+                parse_mode='Markdown')
+        return
+
+    # Fallback for unknown commands or messages
     else:
         if message.text.startswith('/'):
             if message.text.lower() not in ['/start','/search','/list','/add','/delete','/lookup','/cancel','/history','/myinfo','/stats','/export','/reset']:
@@ -557,10 +594,13 @@ def search_user_command(message):
         logger.error(f"Search error: {e}")
         bot.reply_to(message, "❌ Error.")
 
+# =========================================================
+# MODIFIED: /cancel now clears both possible states
+# =========================================================
 @bot.message_handler(commands=['cancel'])
 def cancel_command(message):
     user_id = message.from_user.id
-    if user_states.get(user_id) == 'waiting_for_phone':
+    if user_states.get(user_id) in ('waiting_for_phone', 'waiting_for_username'):
         user_states[user_id] = None
         bot.reply_to(message, "✅ Cancelled.")
     else:
