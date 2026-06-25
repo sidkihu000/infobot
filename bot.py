@@ -29,7 +29,7 @@ if not API_TOKEN:
     logger.critical("Bot token missing")
     raise ValueError("Bot token not set")
 
-# Your API keys (can be overridden by .env)
+# All your API keys (can be overridden via .env file)
 TRUECALLER_API_KEY = os.getenv('TRUECALLER_API_KEY', 'bFPQlc1129809f801461eb218b146cc5ca550')
 VERIPHONE_API_KEY = os.getenv('VERIPHONE_API_KEY', '161EEE47A53242C7B8E11F414B34C23B')
 IPQS_PHONE_API_KEY = os.getenv('IPQS_PHONE_API_KEY', '96d1fa6b388a44d2a789e266593b7d3f')
@@ -198,10 +198,10 @@ def get_cached_lookup(phone):
 def set_cached_lookup(phone, data):
     phone_cache[phone] = (data, time.time())
 
-# ==================== API CALLS ====================
+# ==================== REAL API CALLS ====================
 
 def truecaller_lookup(phone):
-    """Get full owner info from Truecaller"""
+    """Owner name, address, etc. via Truecaller"""
     if not TRUECALLER_API_KEY:
         return None
     try:
@@ -214,7 +214,7 @@ def truecaller_lookup(phone):
         resp = requests.get(TRUECALLER_API_URL, headers=headers, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        # Truecaller returns a list or object; we'll take the first result
+        # Truecaller can return a list or a dict; we take the first result.
         if isinstance(data, list) and len(data) > 0:
             entry = data[0]
             return {
@@ -345,10 +345,10 @@ def lookup_phone_number(phone):
     if cached:
         return cached
 
-    # 1. Truecaller – primary source for owner name, address
+    # 1. Truecaller – primary for owner name/address
     tc_data = truecaller_lookup(phone)
 
-    # 2. Fallback/enrichment APIs
+    # 2. Enrichment APIs
     num = numverify_lookup(phone)
     veri = veriphone_lookup(phone)
     ipqs = ipqs_phone_lookup(phone)
@@ -372,34 +372,29 @@ def lookup_phone_number(phone):
     }
 
     if tc_data:
-        # Truecaller data is our premium info
         final['valid'] = True
-        final['name'] = tc_data.get('name', '') or 'N/A'
+        final['name'] = tc_data.get('name') or 'N/A'
         final['alternate_names'] = tc_data.get('alternate_names', [])
-        final['address'] = tc_data.get('address', '') or 'N/A'
-        final['city'] = tc_data.get('city', '') or 'N/A'
-        final['country'] = tc_data.get('country', '') or 'N/A'
-        final['carrier'] = tc_data.get('carrier', '') or 'N/A'
-        final['line_type'] = tc_data.get('line_type', '') or 'N/A'
+        final['address'] = tc_data.get('address') or 'N/A'
+        final['city'] = tc_data.get('city') or 'N/A'
+        final['country'] = tc_data.get('country') or 'N/A'
+        final['carrier'] = tc_data.get('carrier') or 'N/A'
+        final['line_type'] = tc_data.get('line_type') or 'N/A'
         final['ip'] = tc_data.get('ip', '')
         final['isp'] = tc_data.get('isp', '')
         final['latitude'] = tc_data.get('latitude')
         final['longitude'] = tc_data.get('longitude')
-        # Still enrich with IPQS coordinates/fraud if missing
+        # Enrich with IPQS/Veriphone where Truecaller may lack details
         if ipqs:
-            if not final['latitude']:
-                final['latitude'] = ipqs.get('latitude')
-            if not final['longitude']:
-                final['longitude'] = ipqs.get('longitude')
+            if not final['latitude']: final['latitude'] = ipqs.get('latitude')
+            if not final['longitude']: final['longitude'] = ipqs.get('longitude')
             final['fraud_score'] = ipqs.get('fraud_score')
             final['zip_code'] = ipqs.get('zip_code', '')
             final['region'] = ipqs.get('region', '')
-            if not final['isp']:
-                final['isp'] = ipqs.get('isp', '')
-        if num and not final['country']:
-            final['country'] = num.get('country', '')
+            if not final['isp']: final['isp'] = ipqs.get('isp', '')
+        if num and not final['country']: final['country'] = num.get('country', '')
     else:
-        # Fallback: use IPQS, Veriphone, NumVerify
+        # Fallback chain: IPQS -> Veriphone -> NumVerify
         if ipqs:
             final['valid'] = True
             final['carrier'] = ipqs.get('carrier') or (veri.get('carrier') if veri else (num.get('carrier') if num else 'N/A'))
@@ -440,7 +435,6 @@ def validate_phone_number(phone):
 user_states = {}
 
 # ==================== BOT COMMANDS ====================
-
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -477,7 +471,7 @@ def handle_callback(call):
             "- /start – main menu\n"
             "- /search <telegram_id> – find user by ID\n"
             "- /list – all users (admin only)\n"
-            "- /lookup <phone> – phone info (Truecaller + more)\n"
+            "- /lookup <phone> – full owner info (Truecaller + more)\n"
             "- /ip <ip> – IP intelligence\n"
             "- /add <id> <name> <phone> – add user (admin only)\n"
             "- /delete <id> – remove user (admin only)\n"
@@ -538,7 +532,7 @@ def handle_phone_lookup(message):
             bot.reply_to(message, "❌ API error. Try again later.")
             return
 
-        # Response formatting
+        # Format the response
         response = f"✅ **Phone Lookup Results**\n\n📞 `{phone}`\n"
         if not info.get('valid'):
             response += "❌ **Invalid / not found**\n"
@@ -605,7 +599,8 @@ def handle_phone_lookup(message):
 
     else:
         if message.text.startswith('/'):
-            if message.text.lower() not in ['/start','/search','/list','/add','/delete','/lookup','/cancel','/history','/myinfo','/stats','/export','/reset','/ip']:
+            allowed_commands = ['/start','/search','/list','/add','/delete','/lookup','/cancel','/history','/myinfo','/stats','/export','/reset','/ip']
+            if message.text.lower() not in allowed_commands:
                 bot.reply_to(message, "❓ Unknown command. Use /start.")
         else:
             bot.reply_to(message, "Use /start to see options.")
@@ -686,7 +681,7 @@ def ip_lookup_command(message):
         logger.error(f"IP lookup error: {e}")
         bot.reply_to(message, "❌ Error.")
 
-# --- Other commands (history, myinfo, reset, admin, etc.) ---
+# --- Remaining commands (history, myinfo, etc.) unchanged ---
 @bot.message_handler(commands=['history'])
 def history_command(message):
     user_id = message.from_user.id
@@ -850,7 +845,7 @@ def export_command(message):
 
 # ==================== MAIN ====================
 if __name__ == '__main__':
-    logger.info("Bot started. Using Truecaller, Veriphone, IPQS, NumVerify.")
+    logger.info("Bot started. Truecaller + IPQS + Veriphone + NumVerify integrated.")
     try:
         bot.infinity_polling()
     except Exception as e:
