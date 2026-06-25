@@ -13,7 +13,7 @@ import requests
 import subprocess
 
 # ==================== CONFIG ====================
-BOT_TOKEN = "8637135798:AAEGe1b-LOyOy21soiAp8uAcuAaCf_LfO2A"
+BOT_TOKEN = "6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU"
 ADMIN_IDS = [2119464081]
 
 # ==================== COOKIES FILE (for YouTube authentication) ====================
