@@ -1,8 +1,0 @@
-[build]
-builder = "nixpacks"
-
-[build.nixpacks]
-packages = ["python312", "ffmpeg"]
-
-[deploy]
-startCommand = "python bot.py"
