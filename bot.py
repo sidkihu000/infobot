@@ -164,7 +164,7 @@ async def search_jiosaavan(query):
         logger.error(f"JioSaavan API error: {e}")
     return None
 
-# ---- YouTube Music Search (Fallback) ----
+# ---- YouTube Music Search ----
 async def search_youtube_audio(query):
     """Search music using YouTube"""
     if not YTDLP_AVAILABLE:
@@ -284,8 +284,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"Current Mode: {mode.upper()}\n"
     msg += f"Music Source: JioSaavan + YouTube\n\n"
     msg += "**Commands:**\n"
+    msg += "• Use 'find song_name' or 'search song_name'\n"
     msg += "• Mention 'adumusic' to chat with AI\n"
-    msg += "• Send song name for instant music\n"
     msg += "• /switch - Toggle AI/Music mode\n"
     msg += "• /animate @name - Create name video\n"
     msg += "• Reply to video + /setvideo - Set bg video\n"
@@ -314,7 +314,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
     
     elif query.data == "music_info":
-        msg = "🎵 **Music Search:**\nJust send me any song name and I'll find it using JioSaavan & YouTube!"
+        msg = "🎵 **Music Search:**\nUse 'find song_name' or 'search song_name' to get instant audio files!"
         await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
     
     elif query.data == "ai_info":
@@ -329,7 +329,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
     
     elif query.data == "help_info":
-        msg = "❓ **Help:**\nJust type normally or mention 'adumusic' for AI responses."
+        msg = "❓ **Help:**\nJust type 'find song_name' or mention 'adumusic' for AI responses."
         await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
     
     elif query.data == "upgrade":
@@ -441,87 +441,62 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
     
-    # Check if "adumusic" is mentioned
     text_lower = text.lower()
-    is_mentioned = "adumusic" in text_lower
     
-    # If it's a group chat, only respond when mentioned
-    if update.effective_chat.type in ["group", "supergroup"]:
-        if not is_mentioned and not text.startswith('/'):
-            return
+    # DIRECT SONG SEARCH - Keywords: find, search
+    # This pattern matches: "find song_name", "search song_name", "find artist song", etc.
+    song_search_pattern = r'(?i)^(find|search)\s+(.+)'
+    match = re.match(song_search_pattern, text)
     
-    # Song detection patterns
-    song_patterns = [
-        r'(?i)(play|send|search|find|song|music)\s+(.+)',
-        r'(?i)(i want to listen to|play me|give me)\s+(.+)',
-        r'(?i)^(.+)\s+(song|music|audio|track)$',
-        r'(?i)(adumusic.*)(play|song|music)\s+(.+)',
-    ]
-    
-    is_song_request = False
-    song_query = ""
-    
-    for pattern in song_patterns:
-        match = re.match(pattern, text_lower)
-        if match:
-            groups = match.groups()
-            # Get the last group as song name
-            for group in reversed(groups):
-                if group and len(group) > 2:
-                    song_query = group
-                    is_song_request = True
-                    break
-            break
-    
-    # If it's a song request
-    if is_song_request and song_query:
-        # Clean song query
-        song_query = re.sub(r'(?i)(adumusic|play|send|search|find|song|music)\s*', '', song_query).strip()
+    if match:
+        song_query = match.group(2).strip()
         
         if song_query:
-            # Send searching message
-            msg = await update.message.reply_text(
-                f"🔍 Searching for '{song_query}' across JioSaavan & YouTube...",
-                reply_markup=get_premium_menu()
-            )
-            
-            # Search music
-            music_result = await search_music(song_query)
-            
-            if music_result:
-                if 'path' in music_result and os.path.exists(music_result['path']):
-                    # Send YouTube audio
-                    try:
-                        with open(music_result['path'], "rb") as f:
-                            await update.message.reply_audio(
-                                audio=f,
-                                title=music_result['title'],
-                                performer="adumusic",
-                                caption=f"🎵 **{music_result['title']}**\n📡 Source: YouTube\n🎧 _Powered by adumusic_",
-                                parse_mode='Markdown',
-                                reply_markup=get_premium_menu()
-                            )
-                        os.unlink(music_result['path'])
-                        await msg.delete()
-                    except Exception as e:
-                        await msg.edit_text(f"❌ Error sending audio: {e}")
+            # Send audio directly without any text message
+            try:
+                # First try JioSaavan for quick results
+                jiosaavan_result = await search_jiosaavan(song_query)
                 
-                elif 'url' in music_result:
-                    # Send JioSaavan audio
-                    await msg.edit_text(
-                        f"🎵 **{music_result['title']}**\n📡 Source: JioSaavan\n\n🔗 [Download/Listen]({music_result['url']})\n\n_Note: JioSaavan songs are streamed via link_",
-                        parse_mode='Markdown',
-                        reply_markup=get_premium_menu(),
-                        disable_web_page_preview=False
+                if jiosaavan_result and 'url' in jiosaavan_result:
+                    # JioSaavan - send as audio link
+                    await update.message.reply_audio(
+                        audio=jiosaavan_result['url'],
+                        title=jiosaavan_result['title'],
+                        performer="adumusic",
+                        reply_markup=get_premium_menu()
                     )
-            else:
-                await msg.edit_text(
-                    f"❌ Sorry, couldn't find '{song_query}'.\nTry another song or check the spelling.",
+                    return
+                
+                # Fallback to YouTube
+                youtube_result = await search_youtube_audio(song_query)
+                if youtube_result and 'path' in youtube_result and os.path.exists(youtube_result['path']):
+                    with open(youtube_result['path'], "rb") as f:
+                        await update.message.reply_audio(
+                            audio=f,
+                            title=youtube_result['title'],
+                            performer="adumusic",
+                            reply_markup=get_premium_menu()
+                        )
+                    os.unlink(youtube_result['path'])
+                    return
+                
+                # If both fail, send a subtle error message
+                await update.message.reply_text(
+                    f"❌ Could not find '{song_query}'",
+                    reply_markup=get_premium_menu()
+                )
+                
+            except Exception as e:
+                logger.error(f"Audio send error: {e}")
+                await update.message.reply_text(
+                    "❌ Error processing your request",
                     reply_markup=get_premium_menu()
                 )
         return
     
-    # If not a song request, use Gemini AI
+    # AI CHAT - Only respond when "adumusic" is mentioned
+    is_mentioned = "adumusic" in text_lower
+    
     if is_mentioned or update.effective_chat.type == "private":
         # Remove "adumusic" mention for cleaner AI prompt
         clean_text = re.sub(r'(?i)adumusic\s*', '', text).strip()
@@ -553,7 +528,7 @@ def main():
     # Message handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
     
-    logger.info("adumusic bot is starting with JioSaavan + YouTube + Gemini AI...")
+    logger.info("adumusic bot is starting with instant audio delivery...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
