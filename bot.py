@@ -43,7 +43,7 @@ try:
     YTDLP_AVAILABLE = True
 except ImportError:
     YTDLP_AVAILABLE = False
-    print("yt-dlp not installed – YouTube music disabled, using JioSaavan API.")
+    print("yt-dlp not installed – YouTube music disabled.")
 
 # ---- Logging ----
 logging.basicConfig(
@@ -65,22 +65,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admin_videos (
             chat_id TEXT PRIMARY KEY,
             file_id TEXT NOT NULL
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS spam_counts (
-            chat_id TEXT,
-            user_id TEXT,
-            timestamps_json TEXT,
-            PRIMARY KEY (chat_id, user_id)
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS spam_warnings (
-            chat_id TEXT,
-            user_id TEXT,
-            warn_count INTEGER DEFAULT 0,
-            PRIMARY KEY (chat_id, user_id)
         )
     ''')
     conn.commit()
@@ -125,41 +109,49 @@ def set_admin_video(chat_id, file_id):
 async def search_jiosaavan(query):
     """Search music using JioSaavan API"""
     try:
+        logger.info(f"Searching JioSaavan for: {query}")
         async with aiohttp.ClientSession() as session:
             # Search API
             search_url = f"{API_BASE_URL}/search?query={query}"
+            logger.info(f"JioSaavan API URL: {search_url}")
+            
             async with session.get(search_url) as resp:
+                logger.info(f"JioSaavan response status: {resp.status}")
+                
                 if resp.status == 200:
                     data = await resp.json()
+                    logger.info(f"JioSaavan response data: {json.dumps(data)[:200]}")
                     
-                    # Try to get first song result
-                    if data and 'songs' in data and len(data['songs']) > 0:
-                        song = data['songs'][0]
-                        song_name = song.get('name', 'Unknown')
-                        song_url = song.get('url', '')
-                        
-                        # Get download URL
-                        if song_url:
-                            download_url = f"{API_BASE_URL}/download?url={song_url}"
-                            async with session.get(download_url) as dl_resp:
-                                if dl_resp.status == 200:
-                                    dl_data = await dl_resp.json()
-                                    if dl_data and 'url' in dl_data:
-                                        return {
-                                            'title': song_name,
-                                            'url': dl_data['url'],
-                                            'source': 'JioSaavan'
-                                        }
-                    
-                    # Try albums
-                    elif data and 'albums' in data and len(data['albums']) > 0:
-                        album = data['albums'][0]
-                        return {
-                            'title': album.get('name', 'Unknown'),
-                            'url': album.get('url', ''),
-                            'source': 'JioSaavan',
-                            'type': 'album'
-                        }
+                    # Check for songs
+                    if data and 'data' in data:
+                        songs = data['data'].get('songs', data['data'].get('results', []))
+                        if songs and len(songs) > 0:
+                            song = songs[0] if isinstance(songs, list) else songs
+                            song_name = song.get('name', song.get('title', 'Unknown'))
+                            song_url = song.get('url', song.get('permalink_url', ''))
+                            
+                            logger.info(f"Found song on JioSaavan: {song_name}")
+                            
+                            # Try to get download URL
+                            if song_url:
+                                download_url = f"{API_BASE_URL}/download?url={song_url}"
+                                async with session.get(download_url) as dl_resp:
+                                    if dl_resp.status == 200:
+                                        dl_data = await dl_resp.json()
+                                        audio_url = dl_data.get('url', dl_data.get('download_url', ''))
+                                        if audio_url:
+                                            return {
+                                                'title': song_name,
+                                                'url': audio_url,
+                                                'source': 'JioSaavan'
+                                            }
+                            
+                            # Return song URL if download failed
+                            return {
+                                'title': song_name,
+                                'url': song_url,
+                                'source': 'JioSaavan'
+                            }
     except Exception as e:
         logger.error(f"JioSaavan API error: {e}")
     return None
@@ -168,55 +160,67 @@ async def search_jiosaavan(query):
 async def search_youtube_audio(query):
     """Search music using YouTube"""
     if not YTDLP_AVAILABLE:
+        logger.info("yt-dlp not available, skipping YouTube search")
         return None
     
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
-        "quiet": True,
-        "no_warnings": True,
-        "extractaudio": True,
-        "outtmpl": "%(title)s.%(ext)s",
-        "default_search": "ytsearch1",
-    }
-    
     try:
+        logger.info(f"Searching YouTube for: {query}")
+        
+        # Create temp directory for downloads
+        temp_dir = tempfile.mkdtemp()
+        original_dir = os.getcwd()
+        os.chdir(temp_dir)
+        
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+            "quiet": True,
+            "no_warnings": True,
+            "outtmpl": "%(title)s.%(ext)s",
+            "default_search": "ytsearch1",
+        }
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch1:{query}", download=True)
+            # First search without downloading
+            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+            
             if info and "entries" in info and len(info["entries"]) > 0:
                 entry = info["entries"][0]
                 title = entry.get("title", "song")
                 duration = entry.get("duration", 0)
+                url = entry.get("webpage_url", "")
                 
-                # Find downloaded file
+                logger.info(f"Found on YouTube: {title}")
+                
+                # Download the audio
+                info = ydl.extract_info(url, download=True)
+                
+                # Find the downloaded file
                 for f in os.listdir("."):
-                    if f.endswith(".mp3") and title[:20].replace(" ", "_") in f.replace(" ", "_"):
+                    if f.endswith(".mp3"):
+                        file_path = os.path.abspath(f)
+                        logger.info(f"YouTube download complete: {file_path}")
+                        
+                        os.chdir(original_dir)
                         return {
                             'title': title,
-                            'path': os.path.abspath(f),
+                            'path': file_path,
                             'duration': duration,
                             'source': 'YouTube'
                         }
+                
+        os.chdir(original_dir)
+        
     except Exception as e:
         logger.error(f"YouTube search error: {e}")
-    return None
-
-# ---- Main Music Search Function ----
-async def search_music(query):
-    """Search music with fallback chain"""
-    # Try JioSaavan first
-    result = await search_jiosaavan(query)
-    if result and 'url' in result:
-        return result
-    
-    # Fallback to YouTube
-    youtube_result = await search_youtube_audio(query)
-    if youtube_result:
-        return youtube_result
+        try:
+            os.chdir(original_dir)
+        except:
+            pass
     
     return None
 
@@ -233,28 +237,6 @@ async def get_gemini_response(question, context=""):
     except Exception as e:
         logger.error(f"Gemini error: {e}")
         return "I'm having trouble thinking right now. Please try again."
-
-# ---- Create animated name video ----
-async def create_name_video(background_video_path, name, output_path):
-    if not MOVIEPY_AVAILABLE:
-        return False
-    try:
-        bg = VideoFileClip(background_video_path)
-        bg = bg.resize(height=480)
-        from moviepy.video.VideoClip import ColorClip
-        black_bg = ColorClip(size=(bg.w, 120), color=(0,0,0), duration=bg.duration)
-        black_bg = black_bg.set_position((0, bg.h - 120))
-        composite = CompositeVideoClip([bg, black_bg])
-        txt = TextClip(name, fontsize=70, color='white', stroke_color='blue', stroke_width=2, font='Arial')
-        txt = txt.set_duration(bg.duration)
-        txt = txt.resize(height=100)
-        txt = txt.set_position(('center', bg.h - 60))
-        final = CompositeVideoClip([composite, txt])
-        final.write_videofile(output_path, fps=24, codec='libx264', audio_codec='aac')
-        return True
-    except Exception as e:
-        logger.error(f"Video creation error: {e}")
-        return False
 
 # ---- Premium inline menu ----
 def get_premium_menu():
@@ -287,7 +269,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "• Use 'find song_name' or 'search song_name'\n"
     msg += "• Mention 'adumusic' to chat with AI\n"
     msg += "• /switch - Toggle AI/Music mode\n"
-    msg += "• /animate @name - Create name video\n"
     msg += "• Reply to video + /setvideo - Set bg video\n"
     
     if video:
@@ -311,30 +292,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "premium_info":
         msg = "💎 **Premium Features:**\n• Unlimited songs\n• HD audio quality\n• Priority support\n• No ads\n\nPrice: $5/month"
-        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
-    
     elif query.data == "music_info":
         msg = "🎵 **Music Search:**\nUse 'find song_name' or 'search song_name' to get instant audio files!"
-        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
-    
     elif query.data == "ai_info":
         msg = "🤖 **AI Chat:**\nMention 'adumusic' to chat with AI. I can help with anything using Gemini AI!"
-        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
-    
     elif query.data == "set_video_info":
         if user_id == ADMIN_ID:
-            msg = "🎬 **Set Background Video:**\n1. Reply to a video with /setvideo\n2. Or upload video and use command\n\nThis will be used for name animations!"
+            msg = "🎬 **Set Background Video:**\n1. Reply to a video with /setvideo\n2. Or upload video and use command"
         else:
             msg = "🎬 **Set Background Video:**\nOnly admin can set the background video.\nContact @Xricx0 for access."
-        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
-    
-    elif query.data == "help_info":
-        msg = "❓ **Help:**\nJust type 'find song_name' or mention 'adumusic' for AI responses."
-        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
-    
     elif query.data == "upgrade":
         msg = "⭐ **Upgrade to Premium:**\nContact @Xricx0 to upgrade!"
-        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
+    
+    await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
 
 async def switch_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -350,7 +320,6 @@ async def set_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     
-    # Only admin can set video
     if user.id != ADMIN_ID:
         await update.message.reply_text("❌ Only bot admin can set the video.")
         return
@@ -359,60 +328,18 @@ async def set_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = update.message.reply_to_message.video.file_id
         set_admin_video(chat.id, file_id)
         await update.message.reply_text(
-            "✅ Background video updated successfully!\nUse /animate @name to create animations.",
+            "✅ Background video updated successfully!",
             reply_markup=get_premium_menu()
         )
     else:
         await update.message.reply_text(
-            "📹 **Set Background Video:**\n\n1. Upload a video\n2. Reply to it with /setvideo\n\nThis video will be used for name animations.",
+            "📹 Reply to a video with /setvideo to set it as background.",
             reply_markup=get_premium_menu()
         )
-
-async def animate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /animate @username (or just name)")
-        return
-    name = " ".join(args)
-    if name.startswith("@"):
-        name = name[1:]
-    bg_video = get_admin_video(chat_id)
-    if not bg_video:
-        await update.message.reply_text(
-            "Admin has not set a background video.\nUse /setvideo to set one.",
-            reply_markup=get_premium_menu()
-        )
-        return
-    try:
-        file = await context.bot.get_file(bg_video)
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_in:
-            input_path = tmp_in.name
-        await file.download_to_drive(input_path)
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_out:
-            output_path = tmp_out.name
-        success = await create_name_video(input_path, name, output_path)
-        if success:
-            with open(output_path, "rb") as f:
-                await update.message.reply_video(
-                    video=f,
-                    caption=f"🎬 Animated for {name}\n🎧 _Powered by adumusic_",
-                    reply_markup=get_premium_menu(),
-                    parse_mode='Markdown'
-                )
-            os.unlink(input_path)
-            os.unlink(output_path)
-        else:
-            await update.message.reply_text("Failed to create animation. Check moviepy/ffmpeg.")
-    except Exception as e:
-        logger.error(f"Animate error: {e}")
-        await update.message.reply_text("Error creating animation.")
 
 async def delete_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
     user = update.effective_user
     
-    # Only admin can delete
     if user.id != ADMIN_ID:
         await update.message.reply_text("❌ Only admin can delete messages.")
         return
@@ -429,11 +356,9 @@ async def delete_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Invalid number.")
         return
-    try:
-        await update.message.delete()
-        await update.message.reply_text(f"🗑 Deleted {count} messages successfully!")
-    except Exception as e:
-        await update.message.reply_text(f"Could not delete: {e}")
+    
+    await update.message.delete()
+    await update.message.reply_text(f"🗑 Deleted {count} messages successfully!")
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -442,71 +367,92 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     text_lower = text.lower()
+    logger.info(f"Received message: {text}")
     
-    # DIRECT SONG SEARCH - Keywords: find, search
-    # This pattern matches: "find song_name", "search song_name", "find artist song", etc.
-    song_search_pattern = r'(?i)^(find|search)\s+(.+)'
+    # SONG SEARCH - Keywords: find, search, play
+    song_search_pattern = r'(?i)^(find|search|play)\s+(.+)'
     match = re.match(song_search_pattern, text)
     
     if match:
+        command = match.group(1).lower()
         song_query = match.group(2).strip()
         
+        logger.info(f"Song search requested: command={command}, query={song_query}")
+        
         if song_query:
-            # Send audio directly without any text message
-            try:
-                # First try JioSaavan for quick results
-                jiosaavan_result = await search_jiosaavan(song_query)
-                
-                if jiosaavan_result and 'url' in jiosaavan_result:
-                    # JioSaavan - send as audio link
+            # Send searching message
+            status_msg = await update.message.reply_text(
+                f"🔍 Searching for '{song_query}'...",
+                reply_markup=get_premium_menu()
+            )
+            
+            # Try JioSaavan first
+            logger.info("Trying JioSaavan API...")
+            result = await search_jiosaavan(song_query)
+            
+            if result and 'url' in result:
+                logger.info(f"JioSaavan result: {result}")
+                try:
+                    # Try to send as audio file
                     await update.message.reply_audio(
-                        audio=jiosaavan_result['url'],
-                        title=jiosaavan_result['title'],
+                        audio=result['url'],
+                        title=result['title'],
                         performer="adumusic",
+                        caption=f"🎵 {result['title']}\n📡 Source: JioSaavan",
                         reply_markup=get_premium_menu()
                     )
+                    await status_msg.delete()
                     return
-                
-                # Fallback to YouTube
-                youtube_result = await search_youtube_audio(song_query)
-                if youtube_result and 'path' in youtube_result and os.path.exists(youtube_result['path']):
-                    with open(youtube_result['path'], "rb") as f:
+                except Exception as e:
+                    logger.error(f"Failed to send JioSaavan audio: {e}")
+                    # If can't send as audio, send as link
+                    await status_msg.edit_text(
+                        f"🎵 **{result['title']}**\n📡 Source: JioSaavan\n\n🔗 [Click to listen]({result['url']})",
+                        parse_mode='Markdown',
+                        reply_markup=get_premium_menu(),
+                        disable_web_page_preview=False
+                    )
+                    return
+            
+            # Fallback to YouTube
+            logger.info("Trying YouTube...")
+            result = await search_youtube_audio(song_query)
+            
+            if result and 'path' in result and os.path.exists(result['path']):
+                logger.info(f"YouTube result: {result}")
+                try:
+                    with open(result['path'], "rb") as f:
                         await update.message.reply_audio(
                             audio=f,
-                            title=youtube_result['title'],
+                            title=result['title'],
                             performer="adumusic",
+                            caption=f"🎵 {result['title']}\n📡 Source: YouTube",
                             reply_markup=get_premium_menu()
                         )
-                    os.unlink(youtube_result['path'])
+                    os.unlink(result['path'])
+                    await status_msg.delete()
                     return
-                
-                # If both fail, send a subtle error message
-                await update.message.reply_text(
-                    f"❌ Could not find '{song_query}'",
-                    reply_markup=get_premium_menu()
-                )
-                
-            except Exception as e:
-                logger.error(f"Audio send error: {e}")
-                await update.message.reply_text(
-                    "❌ Error processing your request",
-                    reply_markup=get_premium_menu()
-                )
+                except Exception as e:
+                    logger.error(f"Failed to send YouTube audio: {e}")
+            
+            # If both failed
+            await status_msg.edit_text(
+                f"❌ Sorry, couldn't find '{song_query}'.\nPlease try:\n• Different spelling\n• Artist name + song name\n• Only the song name",
+                reply_markup=get_premium_menu()
+            )
         return
     
     # AI CHAT - Only respond when "adumusic" is mentioned
     is_mentioned = "adumusic" in text_lower
     
     if is_mentioned or update.effective_chat.type == "private":
-        # Remove "adumusic" mention for cleaner AI prompt
         clean_text = re.sub(r'(?i)adumusic\s*', '', text).strip()
         if not clean_text:
             clean_text = "Hello"
         
-        # Get AI response
+        logger.info(f"AI request: {clean_text}")
         response = await get_gemini_response(clean_text)
         
-        # Send with premium menu
         await update.message.reply_text(
             f"🤖 {response}",
             reply_markup=get_premium_menu()
@@ -519,16 +465,15 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("switch", switch_mode))
     application.add_handler(CommandHandler("setvideo", set_video))
-    application.add_handler(CommandHandler("animate", animate))
     application.add_handler(CommandHandler("del", delete_messages))
     
-    # Callback query handler for inline buttons
+    # Callback query handler
     application.add_handler(CallbackQueryHandler(button_handler))
     
     # Message handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
     
-    logger.info("adumusic bot is starting with instant audio delivery...")
+    logger.info("adumusic bot is starting...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
