@@ -14,7 +14,7 @@ import requests
 import sqlite3
 
 # ---- Configuration ----
-TOKEN = os.getenv("BOT_TOKEN", "6248614957:AAGWzd37KASqv6u3OZRxt3gPaqkkdpmRNHg")
+TOKEN = os.getenv("BOT_TOKEN", "6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU")
 ADMIN_ID = 2119464081
 API_BASE_URL = "https://jiosavanapiryden.vercel.app/api"
 SUPPORT_LINK = "https://t.me/Xricx0"
