@@ -17,6 +17,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
     CallbackQueryHandler,
+    Updater,                     # ← needed for the patch
 )
 
 # ---- Optional: for video creation ----
@@ -57,6 +58,15 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# Monkey-patch for python-telegram-bot Updater __slots__ bug
+# (prevents AttributeError on some Python 3.13 / PTB versions)
+# ------------------------------------------------------------------
+_slots = list(Updater.__slots__) if hasattr(Updater, '__slots__') else []
+_missing = '_Updater__polling_cleanup_cb'
+if _missing not in _slots:
+    Updater.__slots__ = tuple(_slots) + (_missing,)
 
 # ---- Database setup ----
 def init_db():
