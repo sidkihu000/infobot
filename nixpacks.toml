@@ -1,4 +1,5 @@
-[packages]
-ffmpeg = "latest"
-     providers = ["python"]
-NIXPACKS_PYTHON_VERSION = "3.11"
+[build]
+builder = "RAILWAY_BUILDER_NIXPACKS"
+
+[deploy]
+startCommand = "python bot.py"
