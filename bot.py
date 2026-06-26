@@ -69,17 +69,6 @@ user_states = {}
 user_last_search = {}
 RATE_LIMIT_SECONDS = 3
 
-# -------------------- HIGH SPEED ANIMATIONS --------------------
-def fast_animate(chat_id, message_id, text_prefix):
-    """Extremely fast frame animation to keep the bot feeling responsive and pro."""
-    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    for frame in frames:
-        try:
-            bot.edit_message_text(style_primary(f"{frame} {text_prefix}..."), chat_id, message_id)
-            time.sleep(0.1) # Lightning fast
-        except:
-            pass
-
 # Helper Functions
 def add_user(user_id):
     if user_id not in data["users"]:
@@ -187,11 +176,6 @@ def start_command(message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name or "Music Lover"
     add_user(user_id)
-    
-    # Fast boot animation
-    anim_msg = bot.send_message(message.chat.id, style_primary("⚡ Booting engine..."))
-    fast_animate(message.chat.id, anim_msg.message_id, "Loading UI")
-    bot.delete_message(message.chat.id, anim_msg.message_id)
     
     welcome_text = f"""🎵 WELCOME TO MELODY STREAM PRO 🎵
 
@@ -618,8 +602,7 @@ def handle_text(message):
             bot.send_message(message.chat.id, style_primary("❌ Please enter a valid song name after 'find' (at least 2 characters)"))
             return
         
-        searching_msg = bot.send_message(message.chat.id, style_primary(f"🎵 Searching: {search_query}"))
-        fast_animate(message.chat.id, searching_msg.message_id, "Scanning database")
+        searching_msg = bot.send_message(message.chat.id, style_primary(f"🎵 Searching: {search_query}..."))
         
         results = search_songs(search_query, page=0, limit=15)
         
@@ -672,7 +655,6 @@ def song_callback(call):
     bot.answer_callback_query(call.id, style_primary("🔄 Initiating Pro Download..."))
     
     processing_msg = bot.send_message(call.message.chat.id, style_primary("🎵 PROCESSING PRO FRAME..."))
-    fast_animate(call.message.chat.id, processing_msg.message_id, "Fetching HQ audio")
     
     try:
         song_details = get_song_details(song_id)
