@@ -1,15 +1,17 @@
-import os
-import json
-import logging
-import re
-import asyncio
-import tempfile
-import sqlite3
+import os, json, logging, re, asyncio, tempfile, sqlite3
 from datetime import datetime, timedelta
 from collections import defaultdict
-
 import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+# ---------- Patch for Updater slots bug (MUST be right after the import) ----------
+from telegram.ext import Updater
+_slots = list(Updater.__slots__) if hasattr(Updater, '__slots__') else []
+_missing = '_Updater__polling_cleanup_cb'
+if _missing not in _slots:
+    Updater.__slots__ = tuple(_slots) + (_missing,)
+
+# Now import the rest of telegram.ext safely
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -17,10 +19,9 @@ from telegram.ext import (
     filters,
     ContextTypes,
     CallbackQueryHandler,
-    Updater,                     # ← needed for the patch
 )
 
-# ---- Optional: for video creation ----
+# ---- Optional: video creation ----
 try:
     from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, ImageClip
     from moviepy.video.fx.all import resize
@@ -29,7 +30,7 @@ except ImportError:
     MOVIEPY_AVAILABLE = False
     print("moviepy not installed – animate feature disabled.")
 
-# ---- Optional: for music download ----
+# ---- Optional: music download ----
 try:
     import yt_dlp
     YTDLP_AVAILABLE = True
@@ -37,7 +38,7 @@ except ImportError:
     YTDLP_AVAILABLE = False
     print("yt-dlp not installed – music search disabled.")
 
-# ---- Optional: for AI answers ----
+# ---- Optional: AI answers ----
 try:
     import aiohttp
     AI_AVAILABLE = True
@@ -48,8 +49,6 @@ except ImportError:
 # ---- Configuration ----
 TOKEN = "6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU"   # Your bot token
 OWNER_ID = 2119464081  # Your Telegram user ID (owner)
-
-# Use a persistent volume if provided by Railway, otherwise local directory
 DB_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", ".")
 DB_FILE = os.path.join(DB_PATH, "bot_data.db")
 
@@ -58,15 +57,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# ------------------------------------------------------------------
-# Monkey-patch for python-telegram-bot Updater __slots__ bug
-# (prevents AttributeError on some Python 3.13 / PTB versions)
-# ------------------------------------------------------------------
-_slots = list(Updater.__slots__) if hasattr(Updater, '__slots__') else []
-_missing = '_Updater__polling_cleanup_cb'
-if _missing not in _slots:
-    Updater.__slots__ = tuple(_slots) + (_missing,)
 
 # ---- Database setup ----
 def init_db():
@@ -218,7 +208,6 @@ async def search_and_download_audio(query):
 async def get_ai_answer(question):
     if not AI_AVAILABLE:
         return "AI mode not available (aiohttp missing)."
-    # Replace with your own AI endpoint
     return f"🤖 I'm in AI mode! You asked: '{question}'. (Placeholder – add your AI)."
 
 # ---- Create animated name video ----
