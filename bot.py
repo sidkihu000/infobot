@@ -12,11 +12,16 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 import google.generativeai as genai
+import aiohttp
 
 # ---- Configuration ----
 TOKEN = os.getenv("BOT_TOKEN", "6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU")
 OWNER_ID = int(os.getenv("OWNER_ID", "2119464081"))
-GEMINI_API_KEY = "AQ.Ab8RN6KBW9XnJZTH2LP0-s39-BPJHZKVQGrJw42vpGwELUftZA"  # Your provided API key
+ADMIN_ID = 2119464081
+GEMINI_API_KEY = "AQ.Ab8RN6KBW9XnJZTH2LP0-s39-BPJHZKVQGrJw42vpGwELUftZA"
+API_BASE_URL = "https://jiosavanapiryden.vercel.app/api"
+SUPPORT_LINK = "https://t.me/Xricx0"
+CHANNEL_LINK = ""
 DB_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", ".")
 DB_FILE = os.path.join(DB_PATH, "bot_data.db")
 
@@ -38,14 +43,7 @@ try:
     YTDLP_AVAILABLE = True
 except ImportError:
     YTDLP_AVAILABLE = False
-    print("yt-dlp not installed – music search disabled.")
-
-try:
-    import aiohttp
-    AI_AVAILABLE = True
-except ImportError:
-    AI_AVAILABLE = False
-    print("aiohttp not installed – AI mode disabled.")
+    print("yt-dlp not installed – YouTube music disabled, using JioSaavan API.")
 
 # ---- Logging ----
 logging.basicConfig(
@@ -83,12 +81,6 @@ def init_db():
             user_id TEXT,
             warn_count INTEGER DEFAULT 0,
             PRIMARY KEY (chat_id, user_id)
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS user_wallets (
-            user_id TEXT PRIMARY KEY,
-            balance REAL DEFAULT 0
         )
     ''')
     conn.commit()
@@ -129,17 +121,54 @@ def set_admin_video(chat_id, file_id):
     conn.commit()
     conn.close()
 
-# ---- YouTube cookies setup ----
-def get_youtube_cookies():
-    """Returns path to cookies file if exists"""
-    cookies_path = "cookies.txt"
-    if os.path.exists(cookies_path):
-        return cookies_path
+# ---- JioSaavan API Music Search ----
+async def search_jiosaavan(query):
+    """Search music using JioSaavan API"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Search API
+            search_url = f"{API_BASE_URL}/search?query={query}"
+            async with session.get(search_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    
+                    # Try to get first song result
+                    if data and 'songs' in data and len(data['songs']) > 0:
+                        song = data['songs'][0]
+                        song_name = song.get('name', 'Unknown')
+                        song_url = song.get('url', '')
+                        
+                        # Get download URL
+                        if song_url:
+                            download_url = f"{API_BASE_URL}/download?url={song_url}"
+                            async with session.get(download_url) as dl_resp:
+                                if dl_resp.status == 200:
+                                    dl_data = await dl_resp.json()
+                                    if dl_data and 'url' in dl_data:
+                                        return {
+                                            'title': song_name,
+                                            'url': dl_data['url'],
+                                            'source': 'JioSaavan'
+                                        }
+                    
+                    # Try albums
+                    elif data and 'albums' in data and len(data['albums']) > 0:
+                        album = data['albums'][0]
+                        return {
+                            'title': album.get('name', 'Unknown'),
+                            'url': album.get('url', ''),
+                            'source': 'JioSaavan',
+                            'type': 'album'
+                        }
+    except Exception as e:
+        logger.error(f"JioSaavan API error: {e}")
     return None
 
-async def search_and_download_audio(query):
+# ---- YouTube Music Search (Fallback) ----
+async def search_youtube_audio(query):
+    """Search music using YouTube"""
     if not YTDLP_AVAILABLE:
-        return None, None, None
+        return None
     
     ydl_opts = {
         "format": "bestaudio/best",
@@ -155,30 +184,41 @@ async def search_and_download_audio(query):
         "default_search": "ytsearch1",
     }
     
-    # Add cookies if available
-    cookies = get_youtube_cookies()
-    if cookies:
-        ydl_opts["cookiefile"] = cookies
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{query}", download=True)
             if info and "entries" in info and len(info["entries"]) > 0:
                 entry = info["entries"][0]
                 title = entry.get("title", "song")
                 duration = entry.get("duration", 0)
-                url = entry.get("webpage_url", "")
                 
-                # Download the audio
-                info = ydl.extract_info(url, download=True)
+                # Find downloaded file
                 for f in os.listdir("."):
-                    if f.endswith(".mp3") and title[:20] in f:
-                        return os.path.abspath(f), title, duration
-                return None, title, duration
-        except Exception as e:
-            logger.error(f"Music search error: {e}")
-            return None, None, None
-    return None, None, None
+                    if f.endswith(".mp3") and title[:20].replace(" ", "_") in f.replace(" ", "_"):
+                        return {
+                            'title': title,
+                            'path': os.path.abspath(f),
+                            'duration': duration,
+                            'source': 'YouTube'
+                        }
+    except Exception as e:
+        logger.error(f"YouTube search error: {e}")
+    return None
+
+# ---- Main Music Search Function ----
+async def search_music(query):
+    """Search music with fallback chain"""
+    # Try JioSaavan first
+    result = await search_jiosaavan(query)
+    if result and 'url' in result:
+        return result
+    
+    # Fallback to YouTube
+    youtube_result = await search_youtube_audio(query)
+    if youtube_result:
+        return youtube_result
+    
+    return None
 
 # ---- Gemini AI integration ----
 async def get_gemini_response(question, context=""):
@@ -221,13 +261,14 @@ def get_premium_menu():
     keyboard = [
         [
             InlineKeyboardButton("💎 Premium", callback_data="premium_info"),
-            InlineKeyboardButton("🎵 Music Search", callback_data="music_info")
+            InlineKeyboardButton("🎵 Music", callback_data="music_info")
         ],
         [
             InlineKeyboardButton("🤖 AI Chat", callback_data="ai_info"),
-            InlineKeyboardButton("❓ Help", callback_data="help_info")
+            InlineKeyboardButton("🎬 Set Video", callback_data="set_video_info")
         ],
         [
+            InlineKeyboardButton("ℹ️ Support", url=SUPPORT_LINK),
             InlineKeyboardButton("⭐ Upgrade", callback_data="upgrade")
         ]
     ]
@@ -240,39 +281,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     video = get_admin_video(chat_id)
     
     msg = f"🎵 **adumusic - Your Premium Bot**\n\n"
-    msg += f"Current Mode: {mode.upper()}\n\n"
+    msg += f"Current Mode: {mode.upper()}\n"
+    msg += f"Music Source: JioSaavan + YouTube\n\n"
     msg += "**Commands:**\n"
-    msg += "• Just mention 'adumusic' to chat with me\n"
-    msg += "• Send song name for music search\n"
+    msg += "• Mention 'adumusic' to chat with AI\n"
+    msg += "• Send song name for instant music\n"
     msg += "• /switch - Toggle AI/Music mode\n"
     msg += "• /animate @name - Create name video\n"
+    msg += "• Reply to video + /setvideo - Set bg video\n"
     
-    await update.message.reply_text(
-        msg,
-        reply_markup=get_premium_menu(),
-        parse_mode='Markdown'
-    )
+    if video:
+        await update.message.reply_video(
+            video,
+            caption=msg,
+            reply_markup=get_premium_menu(),
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            msg,
+            reply_markup=get_premium_menu(),
+            parse_mode='Markdown'
+        )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user_id = query.from_user.id
     
     if query.data == "premium_info":
         msg = "💎 **Premium Features:**\n• Unlimited songs\n• HD audio quality\n• Priority support\n• No ads\n\nPrice: $5/month"
+        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
+    
     elif query.data == "music_info":
-        msg = "🎵 **Music Search:**\nJust send me any song name and I'll find it for you!"
+        msg = "🎵 **Music Search:**\nJust send me any song name and I'll find it using JioSaavan & YouTube!"
+        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
+    
     elif query.data == "ai_info":
-        msg = "🤖 **AI Chat:**\nMention 'adumusic' to chat with AI. I can help with anything!"
+        msg = "🤖 **AI Chat:**\nMention 'adumusic' to chat with AI. I can help with anything using Gemini AI!"
+        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
+    
+    elif query.data == "set_video_info":
+        if user_id == ADMIN_ID:
+            msg = "🎬 **Set Background Video:**\n1. Reply to a video with /setvideo\n2. Or upload video and use command\n\nThis will be used for name animations!"
+        else:
+            msg = "🎬 **Set Background Video:**\nOnly admin can set the background video.\nContact @Xricx0 for access."
+        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
+    
     elif query.data == "help_info":
         msg = "❓ **Help:**\nJust type normally or mention 'adumusic' for AI responses."
-    elif query.data == "upgrade":
-        msg = "⭐ **Upgrade to Premium:**\nContact @adumusic_admin to upgrade!"
+        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
     
-    await query.edit_message_text(
-        msg,
-        reply_markup=get_premium_menu(),
-        parse_mode='Markdown'
-    )
+    elif query.data == "upgrade":
+        msg = "⭐ **Upgrade to Premium:**\nContact @Xricx0 to upgrade!"
+        await query.edit_message_text(msg, reply_markup=get_premium_menu(), parse_mode='Markdown')
 
 async def switch_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -287,19 +349,24 @@ async def switch_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This command works only in groups.")
+    
+    # Only admin can set video
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Only bot admin can set the video.")
         return
-    member = await chat.get_member(user.id)
-    if not member.is_authenticated or not (member.status in ["administrator", "creator"]):
-        await update.message.reply_text("Only admins can set the video.")
-        return
+    
     if update.message.reply_to_message and update.message.reply_to_message.video:
         file_id = update.message.reply_to_message.video.file_id
         set_admin_video(chat.id, file_id)
-        await update.message.reply_text("✅ Admin video updated.")
+        await update.message.reply_text(
+            "✅ Background video updated successfully!\nUse /animate @name to create animations.",
+            reply_markup=get_premium_menu()
+        )
     else:
-        await update.message.reply_text("Reply to a video message with this command to set it as the admin video.")
+        await update.message.reply_text(
+            "📹 **Set Background Video:**\n\n1. Upload a video\n2. Reply to it with /setvideo\n\nThis video will be used for name animations.",
+            reply_markup=get_premium_menu()
+        )
 
 async def animate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -312,7 +379,10 @@ async def animate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = name[1:]
     bg_video = get_admin_video(chat_id)
     if not bg_video:
-        await update.message.reply_text("Admin has not set a background video. Ask admin to set one via /setvideo.")
+        await update.message.reply_text(
+            "Admin has not set a background video.\nUse /setvideo to set one.",
+            reply_markup=get_premium_menu()
+        )
         return
     try:
         file = await context.bot.get_file(bg_video)
@@ -324,7 +394,12 @@ async def animate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success = await create_name_video(input_path, name, output_path)
         if success:
             with open(output_path, "rb") as f:
-                await update.message.reply_video(video=f, caption=f"🎬 Animated for {name}")
+                await update.message.reply_video(
+                    video=f,
+                    caption=f"🎬 Animated for {name}\n🎧 _Powered by adumusic_",
+                    reply_markup=get_premium_menu(),
+                    parse_mode='Markdown'
+                )
             os.unlink(input_path)
             os.unlink(output_path)
         else:
@@ -336,13 +411,12 @@ async def animate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def delete_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    if chat.type not in ["group", "supergroup"]:
-        await update.message.reply_text("This works only in groups.")
+    
+    # Only admin can delete
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Only admin can delete messages.")
         return
-    member = await chat.get_member(user.id)
-    if not member.is_authenticated or not (member.status in ["administrator", "creator"]):
-        await update.message.reply_text("Only admins can delete messages.")
-        return
+    
     args = context.args
     if not args:
         await update.message.reply_text("Usage: /del <number> (max 100)")
@@ -380,60 +454,77 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     song_patterns = [
         r'(?i)(play|send|search|find|song|music)\s+(.+)',
         r'(?i)(i want to listen to|play me|give me)\s+(.+)',
-        r'(?i)^(.+)\s+(song|music|audio|track)$'
+        r'(?i)^(.+)\s+(song|music|audio|track)$',
+        r'(?i)(adumusic.*)(play|song|music)\s+(.+)',
     ]
     
     is_song_request = False
     song_query = ""
     
     for pattern in song_patterns:
-        match = re.match(pattern, text)
+        match = re.match(pattern, text_lower)
         if match:
-            # Extract song name
             groups = match.groups()
-            if len(groups) > 1:
-                song_query = groups[1]
-            else:
-                song_query = groups[0]
-            is_song_request = True
+            # Get the last group as song name
+            for group in reversed(groups):
+                if group and len(group) > 2:
+                    song_query = group
+                    is_song_request = True
+                    break
             break
     
     # If it's a song request
     if is_song_request and song_query:
-        # Send searching message
-        msg = await update.message.reply_text("🔍 Searching for your song...")
+        # Clean song query
+        song_query = re.sub(r'(?i)(adumusic|play|send|search|find|song|music)\s*', '', song_query).strip()
         
-        audio_path, title, duration = await search_and_download_audio(song_query)
-        
-        if audio_path and os.path.exists(audio_path):
-            try:
-                # Send the audio with premium-looking caption
-                caption = f"🎵 **{title}**\n⏱ Duration: {duration//60}:{duration%60:02d}\n🔊 Quality: HD\n\n🎧 _Powered by adumusic_"
-                
-                with open(audio_path, "rb") as f:
-                    await update.message.reply_audio(
-                        audio=f,
-                        title=title,
-                        performer="adumusic",
-                        caption=caption,
-                        parse_mode='Markdown',
-                        reply_markup=get_premium_menu()
-                    )
-                os.unlink(audio_path)
-                await msg.delete()
-            except Exception as e:
-                await msg.edit_text(f"❌ Error sending audio: {e}")
-        else:
-            await msg.edit_text(
-                f"❌ Sorry, couldn't find '{song_query}'. Please try another song.",
+        if song_query:
+            # Send searching message
+            msg = await update.message.reply_text(
+                f"🔍 Searching for '{song_query}' across JioSaavan & YouTube...",
                 reply_markup=get_premium_menu()
             )
+            
+            # Search music
+            music_result = await search_music(song_query)
+            
+            if music_result:
+                if 'path' in music_result and os.path.exists(music_result['path']):
+                    # Send YouTube audio
+                    try:
+                        with open(music_result['path'], "rb") as f:
+                            await update.message.reply_audio(
+                                audio=f,
+                                title=music_result['title'],
+                                performer="adumusic",
+                                caption=f"🎵 **{music_result['title']}**\n📡 Source: YouTube\n🎧 _Powered by adumusic_",
+                                parse_mode='Markdown',
+                                reply_markup=get_premium_menu()
+                            )
+                        os.unlink(music_result['path'])
+                        await msg.delete()
+                    except Exception as e:
+                        await msg.edit_text(f"❌ Error sending audio: {e}")
+                
+                elif 'url' in music_result:
+                    # Send JioSaavan audio
+                    await msg.edit_text(
+                        f"🎵 **{music_result['title']}**\n📡 Source: JioSaavan\n\n🔗 [Download/Listen]({music_result['url']})\n\n_Note: JioSaavan songs are streamed via link_",
+                        parse_mode='Markdown',
+                        reply_markup=get_premium_menu(),
+                        disable_web_page_preview=False
+                    )
+            else:
+                await msg.edit_text(
+                    f"❌ Sorry, couldn't find '{song_query}'.\nTry another song or check the spelling.",
+                    reply_markup=get_premium_menu()
+                )
         return
     
     # If not a song request, use Gemini AI
     if is_mentioned or update.effective_chat.type == "private":
         # Remove "adumusic" mention for cleaner AI prompt
-        clean_text = text_lower.replace("adumusic", "").strip()
+        clean_text = re.sub(r'(?i)adumusic\s*', '', text).strip()
         if not clean_text:
             clean_text = "Hello"
         
@@ -462,7 +553,7 @@ def main():
     # Message handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
     
-    logger.info("adumusic bot is starting...")
+    logger.info("adumusic bot is starting with JioSaavan + YouTube + Gemini AI...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
