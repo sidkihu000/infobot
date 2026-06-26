@@ -1,96 +1,169 @@
-import os, json, logging, re, time, hashlib
-from datetime import datetime
-import telegram
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    CallbackQueryHandler,
-)
+import telebot
+from telebot import types
 import requests
-import sqlite3
+import json
+import time
+import os
+from datetime import datetime
+import hashlib
+import re
 
-# ---- Configuration ----
-TOKEN = os.getenv("BOT_TOKEN", "6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU")
+# Bot Configuration
+BOT_TOKEN = "6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU"
 ADMIN_ID = 2119464081
 API_BASE_URL = "https://jiosavanapiryden.vercel.app/api"
 SUPPORT_LINK = "https://t.me/Xricx0"
 CHANNEL_LINK = ""
-DB_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", ".")
-DB_FILE = os.path.join(DB_PATH, "bot_data.db")
+
+# Initialize bot
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Data storage
+DATA_FILE = "bot_data.json"
 bot_start_time = time.time()
 
-# ---- Logging ----
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# -------------------- STYLISH PRIMARY TEXT FUNCTION --------------------
+def style_primary(text: str) -> str:
+    """
+    Convert normal text to stylish primary text format.
+    First letter of each word -> normal uppercase
+    Remaining letters -> Unicode small capitals (where available)
+    Numbers, punctuation, emojis remain unchanged.
+    """
+    small_caps_map = {
+        'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ꜰ',
+        'g': 'ɢ', 'h': 'ʜ', 'i': 'ɪ', 'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ',
+        'm': 'ᴍ', 'n': 'ɴ', 'o': 'ᴏ', 'p': 'ᴘ', 'q': 'q',  
+        'r': 'ʀ', 's': 'ꜱ', 't': 'ᴛ', 'u': 'ᴜ', 'v': 'ᴠ', 'w': 'ᴡ',
+        'x': 'x', 'y': 'ʏ', 'z': 'ᴢ'
+    }
+    
+    def convert_word(word: str) -> str:
+        if not word:
+            return word
+        first = word[0].upper() if word[0].isalpha() else word[0]
+        rest = ''.join(small_caps_map.get(ch.lower(), ch) for ch in word[1:])
+        return first + rest
+    
+    words = text.split(' ')
+    converted_words = [convert_word(word) for word in words]
+    return ' '.join(converted_words)
 
-# ---- Database Setup ----
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS admin_videos (chat_id TEXT PRIMARY KEY, file_id TEXT NOT NULL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS stats (key TEXT PRIMARY KEY, value INTEGER)''')
-    conn.commit()
-    conn.close()
+# Load data
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r') as f:
+            return json.load(f)
+    return {
+        "users": [],
+        "total_downloads": 0,
+        "total_searches": 0
+    }
 
-init_db()
+def save_data(data):
+    with open(DATA_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
 
-# ---- Helper Functions ----
-def get_admin_video(chat_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT file_id FROM admin_videos WHERE chat_id = ?", (str(chat_id),))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
+data = load_data()
+user_states = {}
+user_last_search = {}
+RATE_LIMIT_SECONDS = 3
 
-def set_admin_video(chat_id, file_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO admin_videos (chat_id, file_id) VALUES (?, ?)", (str(chat_id), file_id))
-    conn.commit()
-    conn.close()
+# -------------------- HIGH SPEED ANIMATIONS --------------------
+def fast_animate(chat_id, message_id, text_prefix):
+    """Extremely fast frame animation to keep the bot feeling responsive and pro."""
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    for frame in frames:
+        try:
+            bot.edit_message_text(style_primary(f"{frame} {text_prefix}..."), chat_id, message_id)
+            time.sleep(0.1) # Lightning fast
+        except:
+            pass
 
+# Helper Functions
 def add_user(user_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (str(user_id),))
-    conn.commit()
-    conn.close()
+    if user_id not in data["users"]:
+        data["users"].append(user_id)
+        save_data(data)
+        return True
+    return False
 
-def get_users_count():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users")
-    count = c.fetchone()[0]
-    conn.close()
-    return count
+def is_admin(user_id):
+    return user_id == ADMIN_ID
 
-def get_stat(key):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT value FROM stats WHERE key = ?", (key,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else 0
+def check_rate_limit(user_id):
+    now = time.time()
+    if user_id in user_last_search:
+        if now - user_last_search[user_id] < RATE_LIMIT_SECONDS:
+            return False
+    user_last_search[user_id] = now
+    return True
 
-def increment_stat(key):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, 0)", (key,))
-    c.execute("UPDATE stats SET value = value + 1 WHERE key = ?", (key,))
-    conn.commit()
-    conn.close()
+def search_songs(query, page=0, limit=15):
+    try:
+        url = f"{API_BASE_URL}/search/songs"
+        params = {"query": query, "page": page, "limit": limit}
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception as e:
+        print(f"Search error: {e}")
+        return None
+
+def get_song_details(song_id):
+    try:
+        url = f"{API_BASE_URL}/songs/{song_id}"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            song_data = response.json()
+            if song_data.get("success") and song_data.get("data"):
+                song_info = song_data["data"][0]
+                download_links = song_info.get("downloadUrl", [])
+                
+                # Fetch High Quality Image for the Pro Audio Frame
+                img_data = song_info.get("image", [])
+                img_url = img_data[-1].get("url", img_data[-1].get("link", "")) if isinstance(img_data, list) and img_data else ""
+                
+                if download_links:
+                    best_quality = download_links[-1]
+                    duration_sec = song_info.get("duration", 0)
+                    minutes = duration_sec // 60
+                    seconds = duration_sec % 60
+                    formatted_duration = f"{minutes}:{seconds:02d}"
+                    
+                    return {
+                        "url": best_quality.get("url"),
+                        "title": song_info.get("name", "Unknown"),
+                        "artist": ", ".join([a.get("name", "") for a in song_info.get("artists", {}).get("primary", [])]),
+                        "duration": duration_sec,
+                        "duration_formatted": formatted_duration,
+                        "album": song_info.get("album", {}).get("name", ""),
+                        "year": song_info.get("year", "N/A"),
+                        "image_url": img_url
+                    }
+        return None
+    except Exception as e:
+        print(f"Song details error: {e}")
+        return None
+
+def create_main_keyboard(chat_type="private"):
+    # Remove navigation keyboards if it's a group or supergroup
+    if chat_type in ['group', 'supergroup']:
+        return types.ReplyKeyboardRemove()
+        
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    buttons = [
+        types.KeyboardButton("🎵 𝐒𝐄𝐀𝐑𝐂𝐇 𝐌𝐔𝐒𝐈𝐂"),
+        types.KeyboardButton("📊 𝐒𝐓𝐀𝐓𝐒"),
+        types.KeyboardButton("ℹ️ 𝐀𝐁𝐎𝐔𝐓"),
+        types.KeyboardButton("📢 𝐒𝐇𝐀𝐑𝐄 𝐁𝐎𝐓"),
+        types.KeyboardButton("⚙️ 𝐇𝐄𝐋𝐏")
+    ]
+    keyboard.add(*buttons)
+    return keyboard
 
 def format_duration(seconds):
-    if not seconds:
-        return "0:00"
     minutes = seconds // 60
     remaining_seconds = seconds % 60
     return f"{minutes}:{remaining_seconds:02d}"
@@ -107,109 +180,30 @@ def format_uptime(seconds):
     if secs > 0 or not parts: parts.append(f"{secs}s")
     return " ".join(parts)
 
-# ---- Music Search Functions ----
-def search_songs(query, page=0, limit=15):
-    """Search songs using JioSaavan API"""
-    try:
-        url = f"{API_BASE_URL}/search/songs"
-        params = {"query": query, "page": page, "limit": limit}
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        return None
+# ==================== COMMAND HANDLERS ====================
 
-def get_song_details(song_id):
-    """Get song details with download URL"""
-    try:
-        url = f"{API_BASE_URL}/songs/{song_id}"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            song_data = response.json()
-            if song_data.get("success") and song_data.get("data"):
-                song_info = song_data["data"][0]
-                download_links = song_info.get("downloadUrl", [])
-                
-                # Get high quality image
-                img_data = song_info.get("image", [])
-                img_url = img_data[-1].get("url", img_data[-1].get("link", "")) if isinstance(img_data, list) and img_data else ""
-                
-                if download_links:
-                    best_quality = download_links[-1]
-                    duration_sec = song_info.get("duration", 0)
-                    
-                    return {
-                        "url": best_quality.get("url"),
-                        "title": song_info.get("name", "Unknown"),
-                        "artist": ", ".join([a.get("name", "") for a in song_info.get("artists", {}).get("primary", [])]),
-                        "duration": duration_sec,
-                        "duration_formatted": format_duration(duration_sec),
-                        "album": song_info.get("album", {}).get("name", ""),
-                        "year": song_info.get("year", "N/A"),
-                        "image_url": img_url
-                    }
-        return None
-    except Exception as e:
-        logger.error(f"Song details error: {e}")
-        return None
-
-# ---- Inline Menus ----
-def get_main_menu():
-    """Main inline menu for groups and private chats"""
-    keyboard = [
-        [
-            InlineKeyboardButton("🎵 Search Music", callback_data="music_search"),
-            InlineKeyboardButton("📊 Stats", callback_data="stats")
-        ],
-        [
-            InlineKeyboardButton("ℹ️ About", callback_data="about"),
-            InlineKeyboardButton("📢 Share", callback_data="share")
-        ],
-        [
-            InlineKeyboardButton("🎬 Set Video", callback_data="set_video_info"),
-            InlineKeyboardButton("❓ Help", callback_data="help")
-        ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_search_results_menu(songs, search_query):
-    """Create inline menu for search results"""
-    keyboard = []
-    
-    for idx, song in enumerate(songs[:15], 1):
-        song_name = song.get("name", "Unknown")[:35]
-        artists = song.get("artists", {}).get("primary", [])
-        artist_names = ", ".join([a.get("name", "") for a in artists[:2]])[:25]
-        duration = format_duration(song.get("duration", 0))
-        
-        if artist_names:
-            button_text = f"{idx}. {song_name} - {artist_names} [{duration}]"
-        else:
-            button_text = f"{idx}. {song_name} [{duration}]"
-        
-        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"song_{song.get('id')}")])
-    
-    keyboard.append([InlineKeyboardButton("🔄 New Search", callback_data="music_search")])
-    
-    return InlineKeyboardMarkup(keyboard)
-
-# ---- Command Handlers ----
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    first_name = update.effective_user.first_name or "Music Lover"
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    user_id = message.from_user.id
+    first_name = message.from_user.first_name or "Music Lover"
     add_user(user_id)
     
-    msg = f"""🎵 **MELODY STREAM PRO** 🎵
+    # Fast boot animation
+    anim_msg = bot.send_message(message.chat.id, style_primary("⚡ Booting engine..."))
+    fast_animate(message.chat.id, anim_msg.message_id, "Loading UI")
+    bot.delete_message(message.chat.id, anim_msg.message_id)
+    
+    welcome_text = f"""🎵 WELCOME TO MELODY STREAM PRO 🎵
 
 ✨ Hello {first_name}! ✨
 
+Your ultimate destination for high-quality music streaming and downloads.
+
 ━━━━━━━━━━━━━━━━
-🌟 FEATURES 🌟
+🌟 WHAT I OFFER 🌟
 ━━━━━━━━━━━━━━━━
 
-🎧 320kbps Quality Audio
+🎧 320KBPS Quality Audio
 ⚡ Instant Music Delivery
 🔍 Smart Search System
 🖼️ Album Art Framing
@@ -219,40 +213,123 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📖 HOW TO USE 📖
 ━━━━━━━━━━━━━━━━
 
-• Type `find song_name` for music
-• Use buttons below for quick access
-• /setvideo - Set background video
-• /stats - View bot statistics
+1️⃣ Tap on "🎵 𝐒𝐄𝐀𝐑𝐂𝐇 𝐌𝐔𝐒𝐈𝐂"
+2️⃣ Send any song/artist name starting with 'find'
+3️⃣ Choose from search results
+4️⃣ Get instant high-quality audio!
 
 ━━━━━━━━━━━━━━━━
 👨‍💻 Developer: @Xricx0
 ━━━━━━━━━━━━━━━━"""
     
-    await update.message.reply_text(
-        msg,
-        reply_markup=get_main_menu(),
-        parse_mode='Markdown'
-    )
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    total_users = get_users_count()
-    total_searches = get_stat("total_searches")
-    total_downloads = get_stat("total_downloads")
-    uptime = format_uptime(int(time.time() - bot_start_time))
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_dev = types.InlineKeyboardButton("👨‍💻 Developer", url=SUPPORT_LINK)
+    btn_channel = types.InlineKeyboardButton("📢 Updates Channel", url=CHANNEL_LINK)
+    btn_search = types.InlineKeyboardButton("🎵 𝐒𝐄𝐀𝐑𝐂𝐇 𝐌𝐔𝐒𝐈𝐂", callback_data="quick_search")
+    btn_stats = types.InlineKeyboardButton("📊 Bot Stats", callback_data="quick_stats")
+    markup.add(btn_search, btn_stats)
+    markup.add(btn_dev, btn_channel)
     
-    stats_text = f"""📊 **BOT STATISTICS**
+    bot.send_message(message.chat.id, style_primary(welcome_text))
+    bot.send_message(message.chat.id, style_primary("👇 Use the buttons below to get started 👇"), reply_markup=create_main_keyboard(message.chat.type))
+
+@bot.message_handler(commands=['help'])
+def help_command(message):
+    help_text = """📖 MELODY STREAM - HELP GUIDE 📖
 
 ━━━━━━━━━━━━━━━━
-📈 USAGE METRICS
+🎯 QUICK COMMANDS 🎯
+━━━━━━━━━━━━━━━━
+
+/start - Restart the bot
+/help - Show this guide
+/about - About Melody Stream
+/stats - View bot statistics
+/share - Share this bot
+
+━━━━━━━━━━━━━━━━
+🔍 SEARCH TIPS 🔍
+━━━━━━━━━━━━━━━━
+
+• Start your message with 'find'
+• Include artist name for better results
+• Use correct spelling
+• Example: find Shape of You
+
+━━━━━━━━━━━━━━━━
+⚡ FEATURES ⚡
+━━━━━━━━━━━━━━━━
+
+✓ High Quality Audio (320kbps)
+✓ Album Cover Integration
+✓ Unlimited Searches
+✓ Free Forever!
+
+━━━━━━━━━━━━━━━━
+🆘 NEED HELP? Contact: @Xricx0
+
+Enjoy your music journey! 🎧"""
+
+    bot.send_message(message.chat.id, style_primary(help_text), reply_markup=create_main_keyboard(message.chat.type))
+
+@bot.message_handler(commands=['about'])
+def about_command(message):
+    about_text = """🎵 ABOUT MELODY STREAM PRO 🎵
+
+━━━━━━━━━━━━━━━━
+✨ VISION ✨
+━━━━━━━━━━━━━━━━
+
+Bringing high-quality music to everyone, everywhere, completely free.
+
+━━━━━━━━━━━━━━━━
+⚙️ TECHNOLOGY ⚙️
+━━━━━━━━━━━━━━━━
+
+• Advanced Search Algorithm
+• 320KBPS Audio Quality
+• 24/7 Availability
+
+━━━━━━━━━━━━━━━━
+👨‍💻 DEVELOPER 👨‍💻
+━━━━━━━━━━━━━━━━
+
+Name: Xricx0 
+Contact: @Xricx0
+
+━━━━━━━━━━━━━━━━
+📊 BOT STATS 📊
+━━━━━━━━━━━━━━━━
+
+Use /stats to view bot statistics
+
+Keep vibing with Melody Stream! 🎧"""
+
+    bot.send_message(message.chat.id, style_primary(about_text), reply_markup=create_main_keyboard(message.chat.type))
+
+@bot.message_handler(commands=['stats'])
+def stats_command(message):
+    user_id = message.from_user.id
+    
+    total_users = len(data["users"])
+    total_searches = data.get("total_searches", 0)
+    total_downloads = data.get("total_downloads", 0)
+    uptime = time.time() - bot_start_time
+    uptime_str = format_uptime(uptime)
+    
+    stats_text = f"""📊 MELODY STREAM PRO STATISTICS 📊
+
+━━━━━━━━━━━━━━━━
+📈 USAGE METRICS 📈
 ━━━━━━━━━━━━━━━━
 
 👥 Total Users: {total_users:,}
 🔍 Total Searches: {total_searches:,}
 📥 Total Downloads: {total_downloads:,}
-⏱️ Bot Uptime: {uptime}
+⏱️ Bot Uptime: {uptime_str}
 
 ━━━━━━━━━━━━━━━━
-⚡ PERFORMANCE
+⚡ PERFORMANCE ⚡
 ━━━━━━━━━━━━━━━━
 
 💾 Database: Active
@@ -261,266 +338,365 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📦 Quality: Up to 320kbps
 
 ━━━━━━━━━━━━━━━━
-👨‍💻 Developer: @Xricx0"""
+
+Thanks for using Melody Stream! 🎧
+
+— @Xricx0"""
     
-    await update.message.reply_text(
-        stats_text,
-        reply_markup=get_main_menu(),
-        parse_mode='Markdown'
-    )
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = f"""📖 **HELP GUIDE**
+    if is_admin(user_id):
+        stats_text += f"""
 
 ━━━━━━━━━━━━━━━━
-🎯 COMMANDS
+👑 ADMIN INFO 👑
 ━━━━━━━━━━━━━━━━
 
-/start - Restart the bot
-/help - Show this guide
-/stats - View statistics
-/setvideo - Set background video
-
-━━━━━━━━━━━━━━━━
-🔍 SEARCH TIPS
-━━━━━━━━━━━━━━━━
-
-• Type `find song_name`
-• Include artist name for better results
-• Example: `find Shape of You`
-• Example: `find Believer`
-
-━━━━━━━━━━━━━━━━
-🆘 Support: @Xricx0"""
+👤 Admin ID: {ADMIN_ID}
+✅ Status: Active"""
     
-    await update.message.reply_text(
-        help_text,
-        reply_markup=get_main_menu(),
-        parse_mode='Markdown'
-    )
+    bot.send_message(message.chat.id, style_primary(stats_text), reply_markup=create_main_keyboard(message.chat.type))
 
-async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    about_text = """🎵 **ABOUT MELODY STREAM PRO**
-
-━━━━━━━━━━━━━━━━
-✨ VISION
-━━━━━━━━━━━━━━━━
-
-Bringing high-quality music to everyone, everywhere, completely free.
-
-━━━━━━━━━━━━━━━━
-⚙️ TECHNOLOGY
-━━━━━━━━━━━━━━━━
-
-• Advanced Search Algorithm
-• 320kbps Audio Quality
-• 24/7 Availability
-• Album Art Integration
-
-━━━━━━━━━━━━━━━━
-👨‍💻 DEVELOPER
-━━━━━━━━━━━━━━━━
-
-Name: Xricx0
-Contact: @Xricx0"""
+@bot.message_handler(commands=['share'])
+def share_command(message):
+    bot_username = bot.get_me().username
+    share_text = f"🎵 Discover Melody Stream Pro - The Ultimate Music Bot!\n\n✅ Free High-Quality Music\n✅ Instant Downloads\n✅ Unlimited Searches\n\nTry it now: t.me/{bot_username}\n\nCreated by @Xricx0"
     
-    await update.message.reply_text(
-        about_text,
-        reply_markup=get_main_menu(),
-        parse_mode='Markdown'
-    )
-
-async def set_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    tg_share_url = f"https://t.me/share/url?url=https://t.me/{bot_username}&text={requests.utils.quote(share_text)}"
+    wa_share_url = f"https://wa.me/?text={requests.utils.quote(share_text)}"
     
-    if user.id != ADMIN_ID:
-        await update.message.reply_text(
-            "❌ Only admin can set the background video.",
-            reply_markup=get_main_menu()
-        )
+    tg_btn = types.InlineKeyboardButton("📱 Telegram", url=tg_share_url)
+    wa_btn = types.InlineKeyboardButton("💬 WhatsApp", url=wa_share_url)
+    
+    markup.add(tg_btn, wa_btn)
+    
+    bot.send_message(message.chat.id, style_primary("📢 SHARE MELODY STREAM\n\nShare with friends 👇"), reply_markup=markup)
+
+# ==================== BUTTON HANDLERS ====================
+
+@bot.message_handler(func=lambda message: message.text == "🎵 𝐒𝐄𝐀𝐑𝐂𝐇 𝐌𝐔𝐒𝐈𝐂")
+def search_music_button(message):
+    user_id = message.from_user.id
+    user_states[user_id] = "waiting_for_song"
+    
+    search_prompt = """🎵 SEARCH FOR MUSIC 🎵
+
+━━━━━━━━━━━━━━━━
+✨ SEARCH TIPS ✨
+━━━━━━━━━━━━━━━━
+
+🎤 By Artist: "find Arijit Singh"
+🎧 By Song: "find Shape of You"
+🎬 By Movie: "find Animal songs"
+
+━━━━━━━━━━━━━━━━
+📝 EXAMPLES 📝
+━━━━━━━━━━━━━━━━
+
+→ find Believer
+→ find Tere Bina Na Gujara
+→ find Pal Pal by Talwinder
+
+━━━━━━━━━━━━━━━━
+
+Type your search query below starting with 'find': 👇
+
+Send /cancel to cancel ❌"""
+
+    bot.send_message(message.chat.id, style_primary(search_prompt))
+
+@bot.message_handler(func=lambda message: message.text == "📊 𝐒𝐓𝐀𝐓𝐒")
+def stats_button_handler(message):
+    stats_command(message)
+
+@bot.message_handler(func=lambda message: message.text == "ℹ️ 𝐀𝐁𝐎𝐔𝐓")
+def about_button_handler(message):
+    about_command(message)
+
+@bot.message_handler(func=lambda message: message.text == "📢 𝐒𝐇𝐀𝐑𝐄 𝐁𝐎𝐓")
+def share_button_handler(message):
+    share_command(message)
+
+@bot.message_handler(func=lambda message: message.text == "⚙️ 𝐇𝐄𝐋𝐏")
+def help_button_handler(message):
+    help_command(message)
+
+# ==================== ADMIN COMMANDS ====================
+
+@bot.message_handler(commands=['admin'])
+def admin_command(message):
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        bot.send_message(message.chat.id, style_primary("❌ Access Denied!\n\nYou don't have permission to access admin panel."))
         return
     
-    if update.message.reply_to_message and update.message.reply_to_message.video:
-        file_id = update.message.reply_to_message.video.file_id
-        set_admin_video(update.effective_chat.id, file_id)
-        await update.message.reply_text(
-            "✅ **Background video set successfully!**\n\nThis video will be used for animations.",
-            reply_markup=get_main_menu(),
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            "📹 **Set Background Video:**\n\n1. Upload a video\n2. Reply to it with /setvideo\n\nOnly admin can use this command.",
-            reply_markup=get_main_menu(),
-            parse_mode='Markdown'
-        )
+    admin_text = f"""👑 ADMIN PANEL 👑
 
-async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Access Denied!")
+━━━━━━━━━━━━━━━━
+📋 COMMANDS 📋
+━━━━━━━━━━━━━━━━
+
+/stats - View bot statistics
+/broadcast - Send message to users
+/ping - Check bot status
+/backup - Download user backup
+/announce - Make announcement
+
+━━━━━━━━━━━━━━━━
+📊 QUICK INFO 📊
+━━━━━━━━━━━━━━━━
+
+👤 Admin ID: {ADMIN_ID}
+📁 Total Users: {len(data["users"])}
+✅ Status: Active
+
+━━━━━━━━━━━━━━━━
+
+— @Xricx0"""
+    
+    bot.send_message(message.chat.id, style_primary(admin_text))
+
+@bot.message_handler(commands=['ping'])
+def ping_command(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        bot.send_message(message.chat.id, style_primary("❌ Access Denied!"))
         return
     
-    start_time = time.time()
-    msg = await update.message.reply_text("🏓 Pinging...")
-    end_time = time.time()
+    start = time.time()
+    msg = bot.send_message(message.chat.id, style_primary("🏓 Pinging..."))
+    end = time.time()
     
-    response_time = round((end_time - start_time) * 1000, 2)
-    uptime = format_uptime(int(time.time() - bot_start_time))
+    response_time = round((end - start) * 1000, 2)
+    uptime = time.time() - bot_start_time
     
-    ping_text = f"""🏓 **PONG!**
+    ping_text = f"""🏓 PONG!
+
+━━━━━━━━━━━━━━━━
+⚡ RESPONSE TIME ⚡
+━━━━━━━━━━━━━━━━
 
 📡 Latency: {response_time}ms
-⏱️ Uptime: {uptime}
-✅ Status: Online
+⏱️ Uptime: {format_uptime(uptime)}
+✅ Status: Online & Healthy
 
-👨‍💻 @Xricx0"""
+— @Xricx0"""
     
-    await msg.edit_text(ping_text, parse_mode='Markdown')
+    bot.edit_message_text(style_primary(ping_text), message.chat.id, msg.message_id)
 
-# ---- Callback Handlers ----
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
+@bot.message_handler(commands=['broadcast'])
+def broadcast_command(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        bot.send_message(message.chat.id, style_primary("❌ Access Denied!"))
+        return
     
-    if query.data == "music_search":
-        await query.edit_message_text(
-            "🎵 **SEARCH MUSIC**\n\nType your search query starting with `find`:\n\nExample: `find shape of you`\nExample: `find believer`\n\nSend /cancel to cancel",
-            reply_markup=get_main_menu(),
-            parse_mode='Markdown'
-        )
+    msg = bot.send_message(message.chat.id, style_primary("📢 BROADCAST MESSAGE\n\nSend the message you want to broadcast to all users.\n\nSend /cancel to cancel."))
+    bot.register_next_step_handler(msg, process_broadcast)
+
+def process_broadcast(message):
+    if message.text == '/cancel':
+        bot.send_message(message.chat.id, style_primary("❌ Broadcast cancelled."))
+        return
     
-    elif query.data == "stats":
-        total_users = get_users_count()
-        total_searches = get_stat("total_searches")
-        total_downloads = get_stat("total_downloads")
-        uptime = format_uptime(int(time.time() - bot_start_time))
+    broadcast_text = message.text
+    status_msg = bot.send_message(message.chat.id, style_primary("📤 Broadcasting message...\n\n⏳ Please wait..."))
+    
+    success = 0
+    failed = 0
+    
+    for user_id in data["users"]:
+        try:
+            bot.send_message(user_id, style_primary(f"📢 ANNOUNCEMENT\n\n━━━━━━━━━━━━━━━━\n\n{broadcast_text}\n\n━━━━━━━━━━━━━━━━\n\n— @Xricx0"))
+            success += 1
+            time.sleep(0.05)
+        except Exception as e:
+            failed += 1
+            print(f"Failed to send to {user_id}: {e}")
+    
+    result_text = f"""✅ BROADCAST COMPLETE ✅
+
+━━━━━━━━━━━━━━━━
+📊 STATISTICS 📊
+━━━━━━━━━━━━━━━━
+
+✅ Successful: {success}
+❌ Failed: {failed}
+👥 Total Users: {len(data["users"])}
+
+— @Xricx0"""
+    
+    bot.edit_message_text(style_primary(result_text), message.chat.id, status_msg.message_id)
+
+@bot.message_handler(commands=['backup'])
+def backup_command(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        bot.send_message(message.chat.id, style_primary("❌ Access Denied!"))
+        return
+    
+    try:
+        backup_data = {
+            "total_users": len(data["users"]),
+            "users": data["users"],
+            "total_searches": data.get("total_searches", 0),
+            "total_downloads": data.get("total_downloads", 0),
+            "backup_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
         
-        stats_text = f"""📊 **BOT STATISTICS**
-
-👥 Users: {total_users:,}
-🔍 Searches: {total_searches:,}
-📥 Downloads: {total_downloads:,}
-⏱️ Uptime: {uptime}
-
-🎵 Source: JioSaavn
-✅ Status: Online"""
+        backup_file = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(backup_file, 'w') as f:
+            json.dump(backup_data, f, indent=2)
         
-        await query.edit_message_text(
-            stats_text,
-            reply_markup=get_main_menu(),
-            parse_mode='Markdown'
-        )
-    
-    elif query.data == "about":
-        about_text = """🎵 **MELODY STREAM PRO**
-
-High-quality music bot powered by JioSaavn API.
-
-✨ Features:
-• 320kbps Audio
-• Instant Delivery
-• Album Art
-• Unlimited Downloads
-
-👨‍💻 Developer: @Xricx0"""
+        caption = style_primary(f"💾 USER BACKUP\n\n👥 Total Users: {len(data['users'])}\n📅 Date: {backup_data['backup_date']}")
+        with open(backup_file, 'rb') as f:
+            bot.send_document(message.chat.id, f, caption=caption)
         
-        await query.edit_message_text(
-            about_text,
-            reply_markup=get_main_menu(),
-            parse_mode='Markdown'
-        )
-    
-    elif query.data == "share":
-        bot_username = (await context.bot.get_me()).username
-        share_text = f"🎵 Discover Melody Stream Pro!\n\n✅ Free High-Quality Music\n✅ Instant Downloads\n\nTry it: t.me/{bot_username}"
+        os.remove(backup_file)
         
-        share_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📱 Share on Telegram", url=f"https://t.me/share/url?url=https://t.me/{bot_username}&text={share_text}")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_to_main")]
-        ])
-        
-        await query.edit_message_text(
-            "📢 **SHARE WITH FRIENDS**",
-            reply_markup=share_markup,
-            parse_mode='Markdown'
-        )
-    
-    elif query.data == "set_video_info":
-        if user_id == ADMIN_ID:
-            msg = "🎬 **SET BACKGROUND VIDEO**\n\nReply to a video with /setvideo to set it as background for animations."
-        else:
-            msg = "🎬 **Background Video**\n\nOnly admin can set the video. Contact @Xricx0"
-        
-        await query.edit_message_text(
-            msg,
-            reply_markup=get_main_menu(),
-            parse_mode='Markdown'
-        )
-    
-    elif query.data == "help":
-        help_text = """📖 **QUICK HELP**
+    except Exception as e:
+        bot.send_message(message.chat.id, style_primary(f"❌ Backup Failed!\n\nError: {str(e)}"))
 
-🔍 Search: Type `find song_name`
-📊 Stats: /stats
-🎬 Video: /setvideo (admin)
-❓ More: /help
+@bot.message_handler(commands=['announce'])
+def announce_command(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        bot.send_message(message.chat.id, style_primary("❌ Access Denied!"))
+        return
+    
+    msg = bot.send_message(message.chat.id, style_primary("📢 MAKE AN ANNOUNCEMENT\n\nSend your announcement message. It will be pinned!\n\nSend /cancel to cancel."))
+    bot.register_next_step_handler(msg, process_announcement)
 
-Support: @Xricx0"""
+def process_announcement(message):
+    if message.text == '/cancel':
+        bot.send_message(message.chat.id, style_primary("❌ Announcement cancelled."))
+        return
+    
+    announce_text = message.text
+    
+    sent_msg = bot.send_message(message.chat.id, style_primary(f"📢 ANNOUNCEMENT\n\n━━━━━━━━━━━━━━━━\n\n{announce_text}\n\n━━━━━━━━━━━━━━━━\n\n— @Xricx0"))
+    
+    try:
+        bot.pin_chat_message(message.chat.id, sent_msg.message_id)
+    except Exception as e:
+        print(f"Failed to pin message: {e}")
+    
+    bot.send_message(message.chat.id, style_primary("✅ Announcement posted and pinned!"))
+
+# ==================== TEXT HANDLER ====================
+
+@bot.message_handler(func=lambda message: True, content_types=['text'])
+def handle_text(message):
+    user_id = message.from_user.id
+    
+    # Handle cancel
+    if message.text == '/cancel':
+        if user_id in user_states:
+            del user_states[user_id]
+        bot.send_message(message.chat.id, style_primary("❌ Search cancelled"), reply_markup=create_main_keyboard(message.chat.type))
+        return
+    
+    # Handle commands
+    if message.text.startswith('/'):
+        return
+
+    text_lower = message.text.lower()
+    
+    # Check if the user used the 'find ' keyword
+    if text_lower.startswith("find "):
+        if user_id in user_states:
+            del user_states[user_id]
+            
+        if not check_rate_limit(user_id):
+            bot.send_message(message.chat.id, style_primary("⏳ Please wait a few seconds before searching again!"))
+            return
         
-        await query.edit_message_text(
-            help_text,
-            reply_markup=get_main_menu(),
-            parse_mode='Markdown'
-        )
+        # Extract the song name by slicing off the first 5 characters ("find ")
+        search_query = message.text[5:].strip()
+        
+        if len(search_query) < 2:
+            bot.send_message(message.chat.id, style_primary("❌ Please enter a valid song name after 'find' (at least 2 characters)"))
+            return
+        
+        searching_msg = bot.send_message(message.chat.id, style_primary(f"🎵 Searching: {search_query}"))
+        fast_animate(message.chat.id, searching_msg.message_id, "Scanning database")
+        
+        results = search_songs(search_query, page=0, limit=15)
+        
+        if not results or not results.get("success"):
+            bot.edit_message_text(style_primary("❌ No Results Found!\n\nPlease try different spelling or add artist name."), message.chat.id, searching_msg.message_id)
+            return
+        
+        songs = results.get("data", {}).get("results", [])
+        
+        if not songs:
+            bot.edit_message_text(style_primary("❌ No songs found!\n\n💡 Tips: Check spelling or try fewer words."), message.chat.id, searching_msg.message_id)
+            return
+        
+        data["total_searches"] = data.get("total_searches", 0) + 1
+        save_data(data)
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        
+        for idx, song in enumerate(songs[:15], 1):
+            song_name = song.get("name", "Unknown")
+            artists = song.get("artists", {}).get("primary", [])
+            artist_names = ", ".join([a.get("name", "") for a in artists[:2]])
+            duration = song.get("duration", 0)
+            duration_str = format_duration(duration)
+            
+            if artist_names:
+                button_text = f"{idx}. {song_name[:35]} - {artist_names[:25]} [{duration_str}]"
+            else:
+                button_text = f"{idx}. {song_name[:45]} [{duration_str}]"
+            
+            callback_data = f"song_{song.get('id')}"
+            markup.add(types.InlineKeyboardButton(button_text, callback_data=callback_data))
+        
+        bot.edit_message_text(style_primary(f"🎵 SEARCH RESULTS\n\n🔍 For: {search_query}\n📊 Found: {len(songs)} songs\n\n✨ Select a song to frame:"), message.chat.id, searching_msg.message_id, reply_markup=markup)
+        
+        nav_markup = types.InlineKeyboardMarkup(row_width=2)
+        nav_markup.add(types.InlineKeyboardButton("🔄 New Search", callback_data="new_search"), types.InlineKeyboardButton("📊 𝐒𝐓𝐀𝐓𝐒", callback_data="quick_stats"))
+        bot.send_message(message.chat.id, style_primary("👇 Need more options? 👇"), reply_markup=nav_markup)
+        return
     
-    elif query.data == "back_to_main":
-        await query.edit_message_text(
-            "🎵 **MELODY STREAM PRO**\n\nSelect an option:",
-            reply_markup=get_main_menu(),
-            parse_mode='Markdown'
-        )
-    
-    elif query.data.startswith("song_"):
-        await handle_song_selection(update, context)
+    # Ignore keyboard button text, but warn the user for regular invalid texts
+    if message.text not in ["🎵 𝐒𝐄𝐀𝐑𝐂𝐇 𝐌𝐔𝐒𝐈𝐂", "📊 𝐒𝐓𝐀𝐓𝐒", "ℹ️ 𝐀𝐁𝐎𝐔𝐓", "📢 𝐒𝐇𝐀𝐑𝐄 𝐁𝐎𝐓", "⚙️ 𝐇𝐄𝐋𝐏"]:
+        bot.send_message(message.chat.id, style_primary("❌ To search for a song, start your message with 'find'.\n\nExample: find Shape of You"), reply_markup=create_main_keyboard(message.chat.type))
 
-async def handle_song_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    song_id = query.data.replace("song_", "")
+# ==================== CALLBACK HANDLERS ====================
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('song_'))
+def song_callback(call):
+    song_id = call.data.replace('song_', '')
+    bot.answer_callback_query(call.id, style_primary("🔄 Initiating Pro Download..."))
     
-    await query.answer("🔄 Downloading...")
-    
-    processing_msg = await query.message.reply_text("🎵 **Processing...**", parse_mode='Markdown')
+    processing_msg = bot.send_message(call.message.chat.id, style_primary("🎵 PROCESSING PRO FRAME..."))
+    fast_animate(call.message.chat.id, processing_msg.message_id, "Fetching HQ audio")
     
     try:
         song_details = get_song_details(song_id)
         
         if not song_details or not song_details.get("url"):
-            await processing_msg.edit_text(
-                "❌ Download failed! Please try again.",
-                reply_markup=get_main_menu()
-            )
+            bot.edit_message_text(style_primary("❌ Download Failed!\n\n⚠️ Unable to fetch download link. Please try again."), call.message.chat.id, processing_msg.message_id)
             return
         
-        # Download audio
-        audio_response = requests.get(song_details["url"], timeout=45)
+        download_url = song_details["url"]
+        title = song_details["title"]
+        artist = song_details["artist"] or "Unknown Artist"
+        duration = song_details["duration"]
+        duration_formatted = song_details.get("duration_formatted", format_duration(duration))
+        album = song_details.get("album", "Single")
+        year = song_details.get("year", "N/A")
         
-        if audio_response.status_code != 200:
-            await processing_msg.edit_text(
-                "❌ Server error! Please try again.",
-                reply_markup=get_main_menu()
-            )
-            return
+        bot.edit_message_text(style_primary(f"🎵 DOWNLOADING\n\n📀 Song: {title}\n🎤 Artist: {artist}\n\n⏳ Structuring Pro Audio Frame..."), call.message.chat.id, processing_msg.message_id)
         
-        # Save audio file
-        temp_filename = f"music_{hashlib.md5(song_details['title'].encode()).hexdigest()[:8]}.mp3"
-        with open(temp_filename, 'wb') as f:
-            f.write(audio_response.content)
+        bot.send_chat_action(call.message.chat.id, 'upload_document')
+        audio_response = requests.get(download_url, timeout=45)
         
-        # Download thumbnail
+        # Download Thumbnail to create the small professional frame
         thumb_file = None
-        if song_details.get("image_url"):
+        if song_details["image_url"]:
             try:
                 img_response = requests.get(song_details["image_url"], timeout=10)
                 if img_response.status_code == 200:
@@ -530,50 +706,46 @@ async def handle_song_selection(update: Update, context: ContextTypes.DEFAULT_TY
             except:
                 pass
         
-        # Prepare caption
-        caption = f"""🎵 **{song_details['title']}**
+        if audio_response.status_code != 200:
+            bot.edit_message_text(style_primary("❌ Download Failed!\n\n⚠️ Server error. Please try again."), call.message.chat.id, processing_msg.message_id)
+            return
+        
+        temp_filename = f"temp_{song_id}_{hashlib.md5(title.encode()).hexdigest()[:8]}.mp3"
+        with open(temp_filename, 'wb') as f:
+            f.write(audio_response.content)
+        
+        bot.edit_message_text(style_primary(f"🎵 SENDING MUSIC\n\n⏳ Uploading framed audio to Telegram..."), call.message.chat.id, processing_msg.message_id)
+        
+        caption = style_primary(f"""🎵 {title} 🎵
 
 ━━━━━━━━━━━━━━━━
-✨ TRACK DETAILS
+✨ TRACK DETAILS ✨
 ━━━━━━━━━━━━━━━━
 
-🎤 Artist: {song_details['artist']}
-⏱️ Duration: {song_details['duration_formatted']}
-💿 Album: {song_details.get('album', 'Single')}
-📅 Year: {song_details.get('year', 'N/A')}
+🎤 Artist: {artist}
+⏱️ Duration: {duration_formatted}
+💿 Album: {album}
+📅 Year: {year}
 📊 Quality: 320kbps MP3
 
 ━━━━━━━━━━━━━━━━
 👨‍💻 Developer: @Xricx0
 
-🎧 Enjoy your music!"""
+🎧 Keep vibing with Melody Stream!""")
         
-        # Send audio
+        # Send Audio with Thumb to generate the compact video/image frame inside chat
         with open(temp_filename, 'rb') as audio:
             if thumb_file and os.path.exists(thumb_file):
                 with open(thumb_file, 'rb') as thumb:
-                    await query.message.reply_audio(
-                        audio=audio,
-                        title=song_details['title'][:60],
-                        performer=song_details['artist'][:60],
-                        duration=song_details['duration'],
-                        caption=caption,
-                        thumb=thumb,
-                        reply_markup=get_main_menu(),
-                        parse_mode='Markdown'
-                    )
+                    bot.send_audio(call.message.chat.id, audio, title=title[:60], performer=artist[:60], duration=duration, caption=caption, thumb=thumb)
             else:
-                await query.message.reply_audio(
-                    audio=audio,
-                    title=song_details['title'][:60],
-                    performer=song_details['artist'][:60],
-                    duration=song_details['duration'],
-                    caption=caption,
-                    reply_markup=get_main_menu(),
-                    parse_mode='Markdown'
-                )
+                bot.send_audio(call.message.chat.id, audio, title=title[:60], performer=artist[:60], duration=duration, caption=caption)
         
-        # Cleanup
+        try:
+            bot.delete_message(call.message.chat.id, processing_msg.message_id)
+        except:
+            pass
+        
         try:
             os.remove(temp_filename)
             if thumb_file and os.path.exists(thumb_file):
@@ -581,188 +753,68 @@ async def handle_song_selection(update: Update, context: ContextTypes.DEFAULT_TY
         except:
             pass
         
-        # Update stats
-        increment_stat("total_downloads")
+        data["total_downloads"] = data.get("total_downloads", 0) + 1
+        save_data(data)
         
-        # Delete processing message
-        try:
-            await processing_msg.delete()
-        except:
-            pass
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🎵 Search Again", callback_data="new_search"), types.InlineKeyboardButton("📢 𝐒𝐇𝐀𝐑𝐄 𝐁𝐎𝐓", callback_data="share_bot"))
+        bot.send_message(call.message.chat.id, style_primary("✅ Song Sent in Pro Frame Successfully!\n\nWant more music? Use the buttons below 👇"), reply_markup=markup)
         
     except Exception as e:
-        logger.error(f"Song selection error: {e}")
-        await processing_msg.edit_text(
-            "❌ Error occurred! Please try again.",
-            reply_markup=get_main_menu()
-        )
+        print(f"Error in song_callback: {e}")
+        try:
+            bot.edit_message_text(style_primary("❌ Error Occurred!\n\nPlease try again later."), call.message.chat.id, processing_msg.message_id)
+        except:
+            pass
 
-# ---- Message Handler ----
-async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if not text:
-        return
-    
-    text_lower = text.lower()
-    
-    # Fast music search with 'find', 'search', or 'play' keywords
-    if text_lower.startswith("find ") or text_lower.startswith("search ") or text_lower.startswith("play "):
-        # Extract query
-        if text_lower.startswith("find "):
-            song_query = text[5:].strip()
-        elif text_lower.startswith("search "):
-            song_query = text[7:].strip()
-        else:
-            song_query = text[5:].strip()
-        
-        if len(song_query) < 2:
-            await update.message.reply_text(
-                "❌ Please enter at least 2 characters.\n\nExample: `find believer`",
-                reply_markup=get_main_menu(),
-                parse_mode='Markdown'
-            )
-            return
-        
-        # Send searching message
-        status_msg = await update.message.reply_text(
-            f"🔍 **Searching:** {song_query}...",
-            parse_mode='Markdown'
-        )
-        
-        # Search songs
-        results = search_songs(song_query, page=0, limit=15)
-        
-        if not results or not results.get("success"):
-            await status_msg.edit_text(
-                f"❌ No results found for **{song_query}**\n\nTry different spelling or add artist name.",
-                reply_markup=get_main_menu(),
-                parse_mode='Markdown'
-            )
-            return
-        
-        songs = results.get("data", {}).get("results", [])
-        
-        if not songs:
-            await status_msg.edit_text(
-                f"❌ No songs found for **{song_query}**",
-                reply_markup=get_main_menu(),
-                parse_mode='Markdown'
-            )
-            return
-        
-        # Update stats
-        increment_stat("total_searches")
-        
-        # If only one result, download directly
-        if len(songs) == 1:
-            song_id = songs[0].get("id")
-            if song_id:
-                song_details = get_song_details(song_id)
-                
-                if song_details and song_details.get("url"):
-                    audio_response = requests.get(song_details["url"], timeout=45)
-                    
-                    if audio_response.status_code == 200:
-                        temp_filename = f"music_{hashlib.md5(song_details['title'].encode()).hexdigest()[:8]}.mp3"
-                        with open(temp_filename, 'wb') as f:
-                            f.write(audio_response.content)
-                        
-                        thumb_file = None
-                        if song_details.get("image_url"):
-                            try:
-                                img_response = requests.get(song_details["image_url"], timeout=10)
-                                if img_response.status_code == 200:
-                                    thumb_file = f"thumb_{song_id}.jpg"
-                                    with open(thumb_file, 'wb') as tf:
-                                        tf.write(img_response.content)
-                            except:
-                                pass
-                        
-                        caption = f"""🎵 **{song_details['title']}**
+@bot.callback_query_handler(func=lambda call: call.data == "new_search")
+def new_search_callback(call):
+    user_id = call.from_user.id
+    user_states[user_id] = "waiting_for_song"
+    bot.answer_callback_query(call.id, style_primary("🔍 Ready to search!"))
+    bot.send_message(call.message.chat.id, style_primary("🎵 Enter your search query:\n\nStart your message with 'find'! 🎧\n\nExample: find Believer\n\nSend /cancel to cancel"))
 
-🎤 {song_details['artist']}
-⏱️ {song_details['duration_formatted']} | 📊 320kbps
-👨‍💻 @Xricx0"""
-                        
-                        with open(temp_filename, 'rb') as audio:
-                            if thumb_file and os.path.exists(thumb_file):
-                                with open(thumb_file, 'rb') as thumb:
-                                    await update.message.reply_audio(
-                                        audio=audio,
-                                        title=song_details['title'][:60],
-                                        performer=song_details['artist'][:60],
-                                        duration=song_details['duration'],
-                                        caption=caption,
-                                        thumb=thumb,
-                                        reply_markup=get_main_menu(),
-                                        parse_mode='Markdown'
-                                    )
-                            else:
-                                await update.message.reply_audio(
-                                    audio=audio,
-                                    title=song_details['title'][:60],
-                                    performer=song_details['artist'][:60],
-                                    duration=song_details['duration'],
-                                    caption=caption,
-                                    reply_markup=get_main_menu(),
-                                    parse_mode='Markdown'
-                                )
-                        
-                        try:
-                            os.remove(temp_filename)
-                            if thumb_file and os.path.exists(thumb_file):
-                                os.remove(thumb_file)
-                        except:
-                            pass
-                        
-                        increment_stat("total_downloads")
-                        await status_msg.delete()
-                        return
-        
-        # Show search results
-        await status_msg.edit_text(
-            f"🎵 **SEARCH RESULTS**\n\n🔍 Query: {song_query}\n📊 Found: {len(songs)} songs\n\nSelect a song:",
-            reply_markup=get_search_results_menu(songs, song_query),
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Invalid input
-    if not text.startswith('/'):
-        await update.message.reply_text(
-            "🎵 **MELODY STREAM PRO**\n\nType `find song_name` to search music!\n\nExample: `find shape of you`",
-            reply_markup=get_main_menu(),
-            parse_mode='Markdown'
-        )
+@bot.callback_query_handler(func=lambda call: call.data == "quick_search")
+def quick_search_callback(call):
+    user_id = call.from_user.id
+    user_states[user_id] = "waiting_for_song"
+    bot.answer_callback_query(call.id, style_primary("🔍 Type song name using 'find' keyword!"))
+    bot.send_message(call.message.chat.id, style_primary("🎵 What would you like to listen to?\n\nStart your message with 'find'!\n\nExample: find Believer\n\nSend /cancel to cancel"))
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Update {update} caused error {context.error}")
+@bot.callback_query_handler(func=lambda call: call.data == "quick_stats")
+def quick_stats_callback(call):
+    bot.answer_callback_query(call.id, style_primary("📊 Fetching statistics..."))
+    stats_command(call.message)
 
-# ---- Main Function ----
+@bot.callback_query_handler(func=lambda call: call.data == "share_bot")
+def share_bot_callback(call):
+    bot.answer_callback_query(call.id, style_primary("📢 Sharing options..."))
+    share_command(call.message)
+
+# ==================== MAIN FUNCTION ====================
+
 def main():
-    application = Application.builder().token(TOKEN).build()
+    print("=" * 50)
+    print("🎵 MELODY STREAM BOT - STARTING UP 🎵")
+    print("=" * 50)
+    print(f"👑 Developer: @Xricx0")
+    print(f"👑 Admin ID: {ADMIN_ID}")
+    print(f"📊 Total Users: {len(data['users'])}")
+    print(f"🔍 Total Searches: {data.get('total_searches', 0)}")
+    print(f"📥 Total Downloads: {data.get('total_downloads', 0)}")
+    print(f"⏱️ Bot Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 50)
+    print("✅ Bot is running successfully!")
+    print("✅ Admin panel command: /admin")
+    print("=" * 50)
     
-    # Command handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("about", about_command))
-    application.add_handler(CommandHandler("setvideo", set_video))
-    application.add_handler(CommandHandler("ping", ping_command))
-    
-    # Callback query handler
-    application.add_handler(CallbackQueryHandler(button_handler))
-    
-    # Message handler
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
-    
-    # Error handler
-    application.add_error_handler(error_handler)
-    
-    logger.info("🎵 Melody Stream Pro is starting...")
-    logger.info(f"👑 Admin ID: {ADMIN_ID}")
-    
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    while True:
+        try:
+            bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        except Exception as e:
+            print(f"⚠️ Polling error: {e}")
+            print("🔄 Restarting bot in 5 seconds...")
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
