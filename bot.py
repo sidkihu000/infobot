@@ -53,11 +53,16 @@ def style_primary(text: str) -> str:
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            # Ensure new keys exist for backwards compatibility
+            if "start_frame" not in data:
+                data["start_frame"] = None
+            return data
     return {
         "users": [],
         "total_downloads": 0,
-        "total_searches": 0
+        "total_searches": 0,
+        "start_frame": None
     }
 
 def save_data(data):
@@ -177,45 +182,40 @@ def start_command(message):
     first_name = message.from_user.first_name or "Music Lover"
     add_user(user_id)
     
-    welcome_text = f"""🎵 WELCOME TO MELODY STREAM PRO 🎵
+    welcome_text = f"""🎵 MELODY STREAM PRO 🎵
 
 ✨ Hello {first_name}! ✨
 
-Your ultimate destination for high-quality music streaming and downloads.
+Send 'find [song]' or 'search [song]' to download high-quality music instantly. 🎧
 
-━━━━━━━━━━━━━━━━
-🌟 WHAT I OFFER 🌟
-━━━━━━━━━━━━━━━━
-
-🎧 320KBPS Quality Audio
-⚡ Instant Music Delivery
-🔍 Smart Search System
-🖼️ Album Art Framing
-📥 Unlimited Downloads
-
-━━━━━━━━━━━━━━━━
-📖 HOW TO USE 📖
-━━━━━━━━━━━━━━━━
-
-1️⃣ Tap on "🎵 𝐒𝐄𝐀𝐑𝐂𝐇 𝐌𝐔𝐒𝐈𝐂"
-2️⃣ Send any song/artist name starting with 'find'
-3️⃣ Choose from search results
-4️⃣ Get instant high-quality audio!
-
-━━━━━━━━━━━━━━━━
-👨‍💻 Developer: @Xricx0
-━━━━━━━━━━━━━━━━"""
+👨‍💻 Developer: @Xricx0"""
     
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn_dev = types.InlineKeyboardButton("👨‍💻 Developer", url=SUPPORT_LINK)
-    btn_channel = types.InlineKeyboardButton("📢 Updates Channel", url=CHANNEL_LINK)
+    if CHANNEL_LINK:
+        btn_channel = types.InlineKeyboardButton("📢 Channel", url=CHANNEL_LINK)
+        markup.add(btn_dev, btn_channel)
+    else:
+        markup.add(btn_dev)
+    
     btn_search = types.InlineKeyboardButton("🎵 𝐒𝐄𝐀𝐑𝐂𝐇 𝐌𝐔𝐒𝐈𝐂", callback_data="quick_search")
     btn_stats = types.InlineKeyboardButton("📊 Bot Stats", callback_data="quick_stats")
     markup.add(btn_search, btn_stats)
-    markup.add(btn_dev, btn_channel)
     
-    bot.send_message(message.chat.id, style_primary(welcome_text))
-    bot.send_message(message.chat.id, style_primary("👇 Use the buttons below to get started 👇"), reply_markup=create_main_keyboard(message.chat.type))
+    start_frame = data.get("start_frame")
+    
+    # Try sending video frame first
+    if start_frame:
+        try:
+            bot.send_video(message.chat.id, start_frame, caption=style_primary(welcome_text), reply_markup=markup)
+            bot.send_message(message.chat.id, style_primary("👇 Use the buttons below 👇"), reply_markup=create_main_keyboard(message.chat.type))
+            return
+        except Exception as e:
+            print(f"Failed to send start frame: {e}")
+            # Fallback to text below
+            
+    bot.send_message(message.chat.id, style_primary(welcome_text), reply_markup=markup)
+    bot.send_message(message.chat.id, style_primary("👇 Use the buttons below 👇"), reply_markup=create_main_keyboard(message.chat.type))
 
 @bot.message_handler(commands=['help'])
 def help_command(message):
@@ -235,7 +235,7 @@ def help_command(message):
 🔍 SEARCH TIPS 🔍
 ━━━━━━━━━━━━━━━━
 
-• Start your message with 'find'
+• Start your message with 'find ' or 'search '
 • Include artist name for better results
 • Use correct spelling
 • Example: find Shape of You
@@ -369,7 +369,7 @@ def search_music_button(message):
 ━━━━━━━━━━━━━━━━
 
 🎤 By Artist: "find Arijit Singh"
-🎧 By Song: "find Shape of You"
+🎧 By Song: "search Shape of You"
 🎬 By Movie: "find Animal songs"
 
 ━━━━━━━━━━━━━━━━
@@ -377,12 +377,12 @@ def search_music_button(message):
 ━━━━━━━━━━━━━━━━
 
 → find Believer
-→ find Tere Bina Na Gujara
+→ search Tere Bina Na Gujara
 → find Pal Pal by Talwinder
 
 ━━━━━━━━━━━━━━━━
 
-Type your search query below starting with 'find': 👇
+Type your search query below starting with 'find' or 'search': 👇
 
 Send /cancel to cancel ❌"""
 
@@ -425,6 +425,7 @@ def admin_command(message):
 /ping - Check bot status
 /backup - Download user backup
 /announce - Make announcement
+/setframe - Set the start video frame
 
 ━━━━━━━━━━━━━━━━
 📊 QUICK INFO 📊
@@ -439,6 +440,36 @@ def admin_command(message):
 — @Xricx0"""
     
     bot.send_message(message.chat.id, style_primary(admin_text))
+
+@bot.message_handler(commands=['setframe'])
+def setframe_command(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        bot.send_message(message.chat.id, style_primary("❌ Access Denied!"))
+        return
+        
+    msg = bot.send_message(message.chat.id, style_primary("📹 SEND START FRAME\n\nPlease send a video or animation (GIF) to set as the small frame on the /start menu.\n\nSend /cancel to abort."))
+    bot.register_next_step_handler(msg, process_setframe)
+
+def process_setframe(message):
+    if message.text == '/cancel':
+        bot.send_message(message.chat.id, style_primary("❌ Start frame setup cancelled."))
+        return
+        
+    file_id = None
+    if message.video:
+        file_id = message.video.file_id
+    elif message.animation:
+        file_id = message.animation.file_id
+    elif message.document and message.document.mime_type and message.document.mime_type.startswith('video/'):
+        file_id = message.document.file_id
+        
+    if file_id:
+        data["start_frame"] = file_id
+        save_data(data)
+        bot.send_message(message.chat.id, style_primary("✅ Start frame successfully updated! New users will now see this video/animation."))
+    else:
+        bot.send_message(message.chat.id, style_primary("❌ Invalid file type. Please send a valid Video or GIF. Try /setframe again."))
 
 @bot.message_handler(commands=['ping'])
 def ping_command(message):
@@ -580,14 +611,14 @@ def handle_text(message):
         bot.send_message(message.chat.id, style_primary("❌ Search cancelled"), reply_markup=create_main_keyboard(message.chat.type))
         return
     
-    # Handle commands
+    # Ignore standalone commands handled by other functions
     if message.text.startswith('/'):
         return
 
     text_lower = message.text.lower()
     
-    # Check if the user used the 'find ' keyword
-    if text_lower.startswith("find "):
+    # Check if the user used the 'find ' or 'search ' keyword
+    if text_lower.startswith("find ") or text_lower.startswith("search "):
         if user_id in user_states:
             del user_states[user_id]
             
@@ -595,11 +626,14 @@ def handle_text(message):
             bot.send_message(message.chat.id, style_primary("⏳ Please wait a few seconds before searching again!"))
             return
         
-        # Extract the song name by slicing off the first 5 characters ("find ")
-        search_query = message.text[5:].strip()
+        # Extract the song name by slicing off the prefix
+        if text_lower.startswith("find "):
+            search_query = message.text[5:].strip()
+        else:
+            search_query = message.text[7:].strip()
         
         if len(search_query) < 2:
-            bot.send_message(message.chat.id, style_primary("❌ Please enter a valid song name after 'find' (at least 2 characters)"))
+            bot.send_message(message.chat.id, style_primary("❌ Please enter a valid song name (at least 2 characters)"))
             return
         
         searching_msg = bot.send_message(message.chat.id, style_primary(f"🎵 Searching: {search_query}..."))
@@ -643,9 +677,7 @@ def handle_text(message):
         bot.send_message(message.chat.id, style_primary("👇 Need more options? 👇"), reply_markup=nav_markup)
         return
     
-    # Ignore keyboard button text, but warn the user for regular invalid texts
-    if message.text not in ["🎵 𝐒𝐄𝐀𝐑𝐂𝐇 𝐌𝐔𝐒𝐈𝐂", "📊 𝐒𝐓𝐀𝐓𝐒", "ℹ️ 𝐀𝐁𝐎𝐔𝐓", "📢 𝐒𝐇𝐀𝐑𝐄 𝐁𝐎𝐓", "⚙️ 𝐇𝐄𝐋𝐏"]:
-        bot.send_message(message.chat.id, style_primary("❌ To search for a song, start your message with 'find'.\n\nExample: find Shape of You"), reply_markup=create_main_keyboard(message.chat.type))
+    # Notice: the bot will now completely ignore any text that isn't a search query. It won't send the warning message anymore.
 
 # ==================== CALLBACK HANDLERS ====================
 
@@ -754,14 +786,14 @@ def new_search_callback(call):
     user_id = call.from_user.id
     user_states[user_id] = "waiting_for_song"
     bot.answer_callback_query(call.id, style_primary("🔍 Ready to search!"))
-    bot.send_message(call.message.chat.id, style_primary("🎵 Enter your search query:\n\nStart your message with 'find'! 🎧\n\nExample: find Believer\n\nSend /cancel to cancel"))
+    bot.send_message(call.message.chat.id, style_primary("🎵 Enter your search query:\n\nStart your message with 'find ' or 'search '!\n\nExample: find Believer\n\nSend /cancel to cancel"))
 
 @bot.callback_query_handler(func=lambda call: call.data == "quick_search")
 def quick_search_callback(call):
     user_id = call.from_user.id
     user_states[user_id] = "waiting_for_song"
     bot.answer_callback_query(call.id, style_primary("🔍 Type song name using 'find' keyword!"))
-    bot.send_message(call.message.chat.id, style_primary("🎵 What would you like to listen to?\n\nStart your message with 'find'!\n\nExample: find Believer\n\nSend /cancel to cancel"))
+    bot.send_message(call.message.chat.id, style_primary("🎵 What would you like to listen to?\n\nStart your message with 'find ' or 'search '!\n\nExample: find Believer\n\nSend /cancel to cancel"))
 
 @bot.callback_query_handler(func=lambda call: call.data == "quick_stats")
 def quick_stats_callback(call):
