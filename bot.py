@@ -27,7 +27,8 @@ BOT_TOKEN = "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
 SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9...")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6LczKzgtAAAAAHjfrXwbQghhKiCOpYfmNhNMi9Nf")
-PROXY_URL = os.getenv("PROXY_URL", "")
+# Clean the proxy URL (remove accidental quotes/spaces)
+PROXY_URL = os.getenv("PROXY_URL", "").strip().strip('"').strip("'")
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -75,13 +76,19 @@ DB.commit()
 def parse_proxy_url(url: str) -> dict | None:
     if not url:
         return None
-    parsed = urlparse(url)
-    config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port or 80}"}
-    if parsed.username:
-        config["username"] = parsed.username
-    if parsed.password:
-        config["password"] = parsed.password
-    return config
+    try:
+        parsed = urlparse(url)
+        if not parsed.hostname:
+            raise ValueError("Invalid proxy URL – no hostname")
+        config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port or 80}"}
+        if parsed.username:
+            config["username"] = parsed.username
+        if parsed.password:
+            config["password"] = parsed.password
+        return config
+    except Exception as e:
+        logger.warning(f"Could not parse proxy URL: {url} – {e}")
+        return None
 
 # ---------- Safe JSON helper ----------
 async def safe_json_response(response) -> dict:
@@ -134,7 +141,7 @@ async def cancel_activation(activation_id: str):
         except Exception as e:
             logger.warning(f"Cancel activation failed (non-critical): {e}")
 
-# ---------- CAPTCHA Solver (2Captcha) – with safe injection ----------
+# ---------- CAPTCHA Solver (2Captcha) – safe injection ----------
 async def solve_captcha(page) -> str:
     if not CAPTCHA_API_KEY:
         logger.warning("CAPTCHA_API_KEY not set")
@@ -183,7 +190,6 @@ async def solve_captcha(page) -> str:
             data = await safe_json_response(resp)
             if data.get("status") == 1:
                 token = data["request"]
-                # Inject the token safely – catch any JS error
                 try:
                     await page.evaluate(f'''
                         const textarea = document.getElementById('g-recaptcha-response');
@@ -232,10 +238,14 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
 
+            # Apply proxy safely
             proxy_config = parse_proxy_url(PROXY_URL)
             if proxy_config:
-                context_options["proxy"] = proxy_config
-                logger.info(f"Using proxy: {proxy_config['server']}")
+                try:
+                    context_options["proxy"] = proxy_config
+                    logger.info(f"Using proxy: {proxy_config['server']}")
+                except Exception as e:
+                    logger.warning(f"Proxy configuration failed, continuing without proxy: {e}")
 
             context = await browser.new_context(**context_options)
             page = await context.new_page()
@@ -545,6 +555,7 @@ async def create_and_notify(bot, chat_id, message_id, user_id: int, email: str, 
         DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?",
                    (email, user_id))
         DB.commit()
+        # Show only the first 150 chars of the error
         error_msg = str(e)[:150]
         await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
                                     text=f"❌ Creation failed: {error_msg}. Refunded ₹10.")
