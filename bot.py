@@ -21,10 +21,8 @@ from telegram.ext import (
 
 # Load environment
 load_dotenv()
-# FIXED: Hardcoded the token properly. 
 BOT_TOKEN = "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
-# Be very careful exposing this JWT API Key!
 SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE4MTQwODY4MzQsImlhdCI6MTc4MjU1MDgzNCwicmF5IjoiMjZjNjk2ZDMwMzNlOWVjMTFhNGRjYzkyODRhY2FiOWMiLCJzdWIiOjQyNjEwOTF9.c8Mej-NVTX_07Coiog4zUf6WRccQ3jlLMe5eB0yH5iTUbTUXpVwQwr6XYQxHc3k6Ecv6X14AmCcMxgL50ECUQ8XnhWXh2Fit0dyQ2axBjcpw3y9VC6VreKTdvA3uDBKOiHDQfZ6gBjMrHUjL3VGJZrtNLlFl--a6fm1TjOGAcvIEkQdtLCik1xEEUmZiH5ZcNEJvfZPoKCzTNtblFujbxBEu8V0aZ4KhS5wQ0LRPTHu7LYWPYY09eYgu-9hcOn_kuVLAc-4jMhcXi9mKyW1SGlHOw9AE01zrM52R4Rom9RRvMhJI97ZGWrpNyx2SG53BRZ-ccIKkbDeaTcwuNNzNeg")
 
 # States for conversations
@@ -105,7 +103,11 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            # Added stealth args to bypass basic Google bot detection
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"]
+            )
             context = await browser.new_context(viewport={"width": 1280, "height": 800})
             page = await context.new_page()
 
@@ -151,35 +153,45 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
 
 # ---------- UI Animations ----------
 async def loading_animation(bot, chat_id, message_id, stop_event: asyncio.Event):
-    """Creates a spinning animation by editing the message dynamically."""
-    # UPDATED: Added a dynamic clock animation
+    """Creates a dynamic progress bar animation."""
     frames = [
-        "🕛 Creating account...", 
-        "🕒 Processing details...", 
-        "🕕 Fetching number...", 
-        "🕘 Verifying SMS..."
+        "🚀 `[■□□□□□□□□□]` Booting creation engine...",
+        "⚙️ `[■■■□□□□□□□]` Bypassing security checks...",
+        "🌐 `[■■■■■□□□□□]` Navigating to Google...",
+        "📝 `[■■■■■■■□□□]` Injecting account details...",
+        "📱 `[■■■■■■■■■□]` Awaiting 5sim SMS code...",
+        "✅ `[■■■■■■■■■■]` Finalizing setup..."
     ]
     try:
         while not stop_event.is_set():
             for frame in frames:
                 if stop_event.is_set():
                     break
-                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=frame)
-                await asyncio.sleep(1)
+                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=frame, parse_mode="Markdown")
+                await asyncio.sleep(2.5) # Slightly longer sleep to match realistic process times
     except Exception as e:
         logging.error(f"Animation error: {e}")
 
 # ---------- Bot Handlers ----------
 def get_main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📧 Email Create", callback_data="email_create")],
-        [InlineKeyboardButton("💰 Wallet", callback_data="wallet")],
-        [InlineKeyboardButton("📞 Admin Contact", url="tg://user?id=Xricx0")],
-        [InlineKeyboardButton("🔐 Login", callback_data="login")],
+        [InlineKeyboardButton("📧 Create New Email", callback_data="email_create")],
+        [InlineKeyboardButton("💰 View Wallet", callback_data="wallet")],
+        [InlineKeyboardButton("📞 Contact Admin", url="tg://user?id=Xricx0")]
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Welcome to Gmail Creator Bot!\nUse the buttons below:", reply_markup=get_main_menu())
+    # Auto-login: Register user instantly upon starting the bot
+    user = update.effective_user
+    DB.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)",
+               (user.id, user.username, user.first_name))
+    DB.commit()
+    
+    welcome_text = (
+        f"👋 Welcome to the Gmail Creator Bot, {user.first_name}!\n\n"
+        "Your account is fully registered. Use the menu below to get started."
+    )
+    await update.message.reply_text(welcome_text, reply_markup=get_main_menu())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -187,40 +199,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     data = query.data
     user_id = query.from_user.id
 
-    if data == "login":
-        DB.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)",
-                   (user_id, query.from_user.username, query.from_user.first_name))
-        DB.commit()
-        await query.edit_message_text("✅ Logged in successfully! Use the menu.", reply_markup=get_main_menu())
-
-    elif data == "wallet":
+    if data == "wallet":
         user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not user:
-            await query.answer("Please login first.", show_alert=True)
-            return
         keyboard = [
-            [InlineKeyboardButton("📥 Deposit", callback_data="deposit")],
-            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
+            [InlineKeyboardButton("📥 Deposit Funds", callback_data="deposit")],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")],
         ]
-        await query.edit_message_text(f"💰 Your Balance: ₹{user['balance']:.2f}", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"💰 **Your Balance:** ₹{user['balance']:.2f}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data == "deposit":
-        user = DB.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not user:
-            await query.answer("Please login first.", show_alert=True)
-            return
-        await query.edit_message_text("Send the amount you want to deposit (numeric, e.g., 100):")
+        await query.edit_message_text("💳 Please send the amount you wish to deposit (numeric only, e.g., 100):")
         return DEPOSIT_AMOUNT
 
     elif data == "email_create":
         user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not user:
-            await query.answer("Please login first.", show_alert=True)
-            return
         if user["balance"] < 10:
-            await query.answer("Insufficient balance. Minimum ₹10 required.", show_alert=True)
+            await query.answer("❌ Insufficient balance. Minimum ₹10 required.", show_alert=True)
             return
-        await query.edit_message_text("Enter desired email username (without @gmail.com):")
+        await query.edit_message_text("📧 Enter your desired email username (without @gmail.com):")
         return EMAIL_USERNAME
 
     elif data == "main_menu":
@@ -247,26 +243,26 @@ async def handle_admin_deposits(query, context, data):
         DB.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (dep["amount"], dep["user_id"]))
         DB.commit()
         await query.edit_message_caption(caption=f"✅ Deposit #{deposit_id} approved.")
-        await context.bot.send_message(dep["user_id"], f"✅ Your deposit of ₹{dep['amount']} has been approved.")
+        await context.bot.send_message(dep["user_id"], f"✅ Your deposit of ₹{dep['amount']} has been approved and credited to your wallet.")
     elif action == "rejdep":
         DB.execute("UPDATE deposits SET status='rejected' WHERE id=?", (deposit_id,))
         DB.commit()
         await query.edit_message_caption(caption=f"❌ Deposit #{deposit_id} rejected.")
-        await context.bot.send_message(dep["user_id"], "❌ Your deposit was rejected. Contact admin.")
+        await context.bot.send_message(dep["user_id"], "❌ Your deposit was rejected. Please contact the admin.")
 
 # ---------- Deposit Conversation ----------
 async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         amount = float(update.message.text)
     except ValueError:
-        await update.message.reply_text("Please send a valid numeric amount.")
+        await update.message.reply_text("⚠️ Please send a valid numeric amount.")
         return DEPOSIT_AMOUNT
     
     context.user_data["deposit_amount"] = amount
     
     if os.path.exists("qr_code.jpg"):
         with open("qr_code.jpg", "rb") as f:
-            await update.message.reply_photo(f, caption=f"Scan to pay ₹{amount}. Then send screenshot or transaction ID.")
+            await update.message.reply_photo(f, caption=f"Scan to pay ₹{amount}. Once done, reply with your payment screenshot or Transaction ID.")
     else:
         await update.message.reply_text(f"Please transfer ₹{amount} and reply with the Transaction ID.")
     return DEPOSIT_SCREENSHOT
@@ -291,23 +287,23 @@ async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await context.bot.send_message(ADMIN_ID, f"{msg_text}\nTxID: {file_id}", reply_markup=InlineKeyboardMarkup(admin_keyboard))
     
-    await update.message.reply_text("✅ Deposit submitted. Admin will verify shortly.", reply_markup=get_main_menu())
+    await update.message.reply_text("✅ Deposit submitted successfully. The admin will verify and credit your account shortly.", reply_markup=get_main_menu())
     return ConversationHandler.END
 
 # ---------- Email Creation Conversation ----------
 async def email_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     username = update.message.text.strip()
     if not re.match(r"^[a-zA-Z0-9._]{6,30}$", username):
-        await update.message.reply_text("Invalid username. Use 6-30 letters, numbers, dots.")
+        await update.message.reply_text("⚠️ Invalid username. Use 6-30 letters, numbers, or dots.")
         return EMAIL_USERNAME
     context.user_data["desired_email"] = username
-    await update.message.reply_text("Enter the password for the account (min 8 chars):")
+    await update.message.reply_text("🔑 Enter the password for the account (minimum 8 characters):")
     return EMAIL_PASSWORD
 
 async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     password = update.message.text.strip()
     if len(password) < 8:
-        await update.message.reply_text("Password too short, min 8 characters. Try again:")
+        await update.message.reply_text("⚠️ Password too short. Please use at least 8 characters:")
         return EMAIL_PASSWORD
     
     user_id = update.effective_user.id
@@ -318,7 +314,7 @@ async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     DB.execute("INSERT INTO email_orders (user_id, desired_email, password, cost) VALUES (?,?,?,?)", (user_id, desired, password, cost))
     DB.commit()
 
-    msg = await update.message.reply_text("⏳ Initializing setup...")
+    msg = await update.message.reply_text("⏳ Queuing task...")
     
     stop_event = asyncio.Event()
     bot_instance = context.bot
@@ -333,14 +329,14 @@ async def create_and_notify(bot, chat_id, message_id, user_id: int, email: str, 
         DB.execute("UPDATE email_orders SET status='completed' WHERE desired_email=? AND user_id=?", (email, user_id))
         DB.commit()
         stop_event.set()
-        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"✅ Account created:\n`{credentials}`", parse_mode="Markdown")
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"🎉 **Account successfully created!**\n\n`{credentials}`", parse_mode="Markdown")
     except Exception as e:
         logging.error(f"Creation failed: {e}")
         stop_event.set()
         DB.execute("UPDATE users SET balance = balance + 10 WHERE user_id=?", (user_id,))
         DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?", (email, user_id))
         DB.commit()
-        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"❌ Creation failed: {str(e)[:100]}. Refunded ₹10.")
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"❌ **Creation Failed.**\nReason: {str(e)[:100]}\n\n₹10 has been refunded to your wallet.", parse_mode="Markdown")
 
 # ---------- Main Execution ----------
 def main():
@@ -367,7 +363,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(deposit_conv)
     application.add_handler(email_conv)
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(login|wallet|main_menu|appdep_|rejdep_).*"))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(wallet|main_menu|appdep_|rejdep_).*"))
 
     application.run_polling()
 
