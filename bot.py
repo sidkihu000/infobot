@@ -22,10 +22,10 @@ from telegram.ext import (
 
 # Load environment
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-SMS_API_KEY = os.getenv("SMS_API_KEY")
-CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
+BOT_TOKEN = os.getenv("6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
+SMS_API_KEY = os.getenv("eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE4MTQwODY4MzQsImlhdCI6MTc4MjU1MDgzNCwicmF5IjoiMjZjNjk2ZDMwMzNlOWVjMTFhNGRjYzkyODRhY2FiOWMiLCJzdWIiOjQyNjEwOTF9.c8Mej-NVTX_07Coiog4zUf6WRccQ3jlLMe5eB0yH5iTUbTUXpVwQwr6XYQxHc3k6Ecv6X14AmCcMxgL50ECUQ8XnhWXh2Fit0dyQ2axBjcpw3y9VC6VreKTdvA3uDBKOiHDQfZ6gBjMrHUjL3VGJZrtNLlFl--a6fm1TjOGAcvIEkQdtLCik1xEEUmZiH5ZcNEJvfZPoKCzTNtblFujbxBEu8V0aZ4KhS5wQ0LRPTHu7LYWPYY09eYgu-9hcOn_kuVLAc-4jMhcXi9mKyW1SGlHOw9AE01zrM52R4Rom9RRvMhJI97ZGWrpNyx2SG53BRZ-ccIKkbDeaTcwuNNzNeg")
+CAPTCHA_API_KEY = os.getenv("6LczKzgtAAAAAHjfrXwbQghhKiCOpYfmNhNMi9Nf")
 
 # States for conversations
 DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
