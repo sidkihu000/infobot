@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import random
 import sqlite3
 from datetime import datetime
 
@@ -19,17 +20,19 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Load environment
+# ---------- Load environment ----------
 load_dotenv()
 BOT_TOKEN = "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
-SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE4MTQwODY4MzQsImlhdCI6MTc4MjU1MDgzNCwicmF5IjoiMjZjNjk2ZDMwMzNlOWVjMTFhNGRjYzkyODRhY2FiOWMiLCJzdWIiOjQyNjEwOTF9.c8Mej-NVTX_07Coiog4zUf6WRccQ3jlLMe5eB0yH5iTUbTUXpVwQwr6XYQxHc3k6Ecv6X14AmCcMxgL50ECUQ8XnhWXh2Fit0dyQ2axBjcpw3y9VC6VreKTdvA3uDBKOiHDQfZ6gBjMrHUjL3VGJZrtNLlFl--a6fm1TjOGAcvIEkQdtLCik1xEEUmZiH5ZcNEJvfZPoKCzTNtblFujbxBEu8V0aZ4KhS5wQ0LRPTHu7LYWPYY09eYgu-9hcOn_kuVLAc-4jMhcXi9mKyW1SGlHOw9AE01zrM52R4Rom9RRvMhJI97ZGWrpNyx2SG53BRZ-ccIKkbDeaTcwuNNzNeg")
+SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9...")
+CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6LczKzgtAAAAAHjfrXwbQghhKiCOpYfmNhNMi9Nf")
+PROXY_URL = os.getenv("PROXY_URL", "")   # Set in Railway env or leave empty
 
 # States for conversations
 DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
 EMAIL_USERNAME, EMAIL_PASSWORD = range(2)
 
-# Database setup
+# ---------- Database ----------
 DB = sqlite3.connect("bot_data.db", check_same_thread=False)
 DB.row_factory = sqlite3.Row
 DB.execute("""
@@ -64,7 +67,6 @@ CREATE TABLE IF NOT EXISTS email_orders (
 """)
 DB.commit()
 
-# Enable logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 # ---------- Number Panel (5sim) Helpers ----------
@@ -95,7 +97,66 @@ async def cancel_activation(activation_id: str):
         await client.get(f"{SIM_API_BASE}/cancel/{activation_id}",
                          headers={"Authorization": f"Bearer {SMS_API_KEY}"})
 
-# ---------- Gmail Creation Engine (Playwright) ----------
+# ---------- CAPTCHA Solver (2Captcha) ----------
+async def solve_captcha(page, sitekey=None) -> str:
+    if not CAPTCHA_API_KEY:
+        logging.warning("CAPTCHA_API_KEY not set – cannot solve captcha")
+        return None
+
+    url = page.url
+    if not sitekey:
+        sitekey = await page.evaluate('''() => {
+            const iframes = document.querySelectorAll('iframe');
+            for (let f of iframes) {
+                const src = f.src;
+                if (src.includes('google.com/recaptcha')) {
+                    const match = src.match(/[?&]k=([^&]+)/);
+                    if (match) return match[1];
+                }
+            }
+            const elems = document.querySelectorAll('[data-sitekey]');
+            if (elems.length > 0) return elems[0].getAttribute('data-sitekey');
+            return null;
+        }''')
+    if not sitekey:
+        logging.info("No reCAPTCHA sitekey found – maybe no CAPTCHA?")
+        return None
+
+    async with httpx.AsyncClient() as client:
+        create_params = {
+            "key": CAPTCHA_API_KEY,
+            "method": "userrecaptcha",
+            "googlekey": sitekey,
+            "pageurl": url,
+            "json": 1,
+        }
+        resp = await client.get("https://2captcha.com/in.php", params=create_params)
+        result = resp.json()
+        if result.get("status") != 1:
+            logging.error(f"2Captcha create error: {result}")
+            return None
+        task_id = result["request"]
+
+        for _ in range(20):
+            await asyncio.sleep(5)
+            poll_resp = await client.get(
+                "https://2captcha.com/res.php",
+                params={
+                    "key": CAPTCHA_API_KEY,
+                    "action": "get",
+                    "id": task_id,
+                    "json": 1,
+                },
+            )
+            data = poll_resp.json()
+            if data.get("status") == 1:
+                return data["request"]
+            if data.get("request") == "ERROR_CAPTCHA_UNSOLVABLE":
+                logging.error("Captcha unsolvable")
+                return None
+    return None
+
+# ---------- Gmail Creation Engine (Enhanced) ----------
 async def create_gmail_account(desired_username: str, password: str) -> str:
     activation = await buy_activation()
     phone_number = activation["phone"]
@@ -103,13 +164,37 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
 
     try:
         async with async_playwright() as p:
-            # Added stealth args to bypass basic Google bot detection
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"]
-            )
-            context = await browser.new_context(viewport={"width": 1280, "height": 800})
+            launch_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--no-sandbox",
+            ]
+            browser = await p.chromium.launch(headless=True, args=launch_args)
+
+            context_options = {
+                "viewport": {"width": 1280, "height": 800},
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            }
+            if PROXY_URL:
+                context_options["proxy"] = {"server": PROXY_URL}
+            context = await browser.new_context(**context_options)
             page = await context.new_page()
+
+            # Stealth patches
+            await page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                window.chrome = { runtime: {} };
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+                );
+            """)
+
+            await asyncio.sleep(random.uniform(1, 3))
 
             await page.goto("https://accounts.google.com/signup/v2/webcreateaccount?flowName=GlifWebSignIn&flowEntry=SignUp")
             await page.wait_for_load_state("networkidle")
@@ -123,6 +208,27 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             await page.click('button:has-text("Next")')
             await page.wait_for_timeout(3000)
 
+            # CAPTCHA handling
+            for attempt in range(2):
+                if await page.is_visible('iframe[src*="google.com/recaptcha"]'):
+                    logging.info("CAPTCHA detected – solving...")
+                    token = await solve_captcha(page)
+                    if token:
+                        await page.evaluate(f'''() => {{
+                            const textarea = document.getElementById('g-recaptcha-response');
+                            if (textarea) textarea.innerHTML = "{token}";
+                            const event = new Event('change', {{ bubbles: true }});
+                            if (textarea) textarea.dispatchEvent(event);
+                        }}''')
+                        await page.click('button:has-text("Next")')
+                        await page.wait_for_timeout(2000)
+                    else:
+                        logging.warning("CAPTCHA solving failed, retrying...")
+                        await page.reload()
+                        await page.wait_for_load_state("networkidle")
+                        continue
+                break
+
             phone_input = await page.wait_for_selector('input[type="tel"]', timeout=15000)
             await phone_input.fill(phone_number)
             await page.click('button:has-text("Next")')
@@ -133,8 +239,8 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             await page.click('button:has-text("Next")')
 
             try:
-                await page.click('button:has-text("I agree")') 
-                await page.click('button:has-text("Next")')
+                await page.click('button:has-text("I agree")', timeout=5000)
+                await page.click('button:has-text("Next")', timeout=5000)
             except:
                 pass
 
@@ -151,47 +257,36 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
         await cancel_activation(activation_id)
         raise e
 
-# ---------- UI Animations ----------
+# ---------- UI Animation ----------
 async def loading_animation(bot, chat_id, message_id, stop_event: asyncio.Event):
-    """Creates a dynamic progress bar animation."""
     frames = [
-        "🚀 `[■□□□□□□□□□]` Booting creation engine...",
-        "⚙️ `[■■■□□□□□□□]` Bypassing security checks...",
-        "🌐 `[■■■■■□□□□□]` Navigating to Google...",
-        "📝 `[■■■■■■■□□□]` Injecting account details...",
-        "📱 `[■■■■■■■■■□]` Awaiting 5sim SMS code...",
-        "✅ `[■■■■■■■■■■]` Finalizing setup..."
+        "🕛 Creating account...",
+        "🕒 Processing details...",
+        "🕕 Fetching number...",
+        "🕘 Verifying SMS..."
     ]
     try:
         while not stop_event.is_set():
             for frame in frames:
                 if stop_event.is_set():
                     break
-                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=frame, parse_mode="Markdown")
-                await asyncio.sleep(2.5) # Slightly longer sleep to match realistic process times
+                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=frame)
+                await asyncio.sleep(1)
     except Exception as e:
         logging.error(f"Animation error: {e}")
 
 # ---------- Bot Handlers ----------
 def get_main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📧 Create New Email", callback_data="email_create")],
-        [InlineKeyboardButton("💰 View Wallet", callback_data="wallet")],
-        [InlineKeyboardButton("📞 Contact Admin", url="tg://user?id=Xricx0")]
+        [InlineKeyboardButton("📧 Email Create", callback_data="email_create")],
+        [InlineKeyboardButton("💰 Wallet", callback_data="wallet")],
+        [InlineKeyboardButton("📞 Admin Contact", url="tg://user?id=Xricx0")],
+        [InlineKeyboardButton("🔐 Login", callback_data="login")],
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Auto-login: Register user instantly upon starting the bot
-    user = update.effective_user
-    DB.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)",
-               (user.id, user.username, user.first_name))
-    DB.commit()
-    
-    welcome_text = (
-        f"👋 Welcome to the Gmail Creator Bot, {user.first_name}!\n\n"
-        "Your account is fully registered. Use the menu below to get started."
-    )
-    await update.message.reply_text(welcome_text, reply_markup=get_main_menu())
+    await update.message.reply_text("Welcome to Gmail Creator Bot!\nUse the buttons below:",
+                                    reply_markup=get_main_menu())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -199,24 +294,42 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     data = query.data
     user_id = query.from_user.id
 
-    if data == "wallet":
+    if data == "login":
+        DB.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)",
+                   (user_id, query.from_user.username, query.from_user.first_name))
+        DB.commit()
+        await query.edit_message_text("✅ Logged in successfully! Use the menu.",
+                                      reply_markup=get_main_menu())
+
+    elif data == "wallet":
         user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not user:
+            await query.answer("Please login first.", show_alert=True)
+            return
         keyboard = [
-            [InlineKeyboardButton("📥 Deposit Funds", callback_data="deposit")],
-            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")],
+            [InlineKeyboardButton("📥 Deposit", callback_data="deposit")],
+            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")],
         ]
-        await query.edit_message_text(f"💰 **Your Balance:** ₹{user['balance']:.2f}", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"💰 Your Balance: ₹{user['balance']:.2f}",
+                                      reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data == "deposit":
-        await query.edit_message_text("💳 Please send the amount you wish to deposit (numeric only, e.g., 100):")
+        user = DB.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not user:
+            await query.answer("Please login first.", show_alert=True)
+            return
+        await query.edit_message_text("Send the amount you want to deposit (numeric, e.g., 100):")
         return DEPOSIT_AMOUNT
 
     elif data == "email_create":
         user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if user["balance"] < 10:
-            await query.answer("❌ Insufficient balance. Minimum ₹10 required.", show_alert=True)
+        if not user:
+            await query.answer("Please login first.", show_alert=True)
             return
-        await query.edit_message_text("📧 Enter your desired email username (without @gmail.com):")
+        if user["balance"] < 10:
+            await query.answer("Insufficient balance. Minimum ₹10 required.", show_alert=True)
+            return
+        await query.edit_message_text("Enter desired email username (without @gmail.com):")
         return EMAIL_USERNAME
 
     elif data == "main_menu":
@@ -229,11 +342,11 @@ async def handle_admin_deposits(query, context, data):
     if query.from_user.id != ADMIN_ID:
         await query.answer("Unauthorized", show_alert=True)
         return
-    
+
     action, deposit_id = data.split("_")
     deposit_id = int(deposit_id)
     dep = DB.execute("SELECT * FROM deposits WHERE id=?", (deposit_id,)).fetchone()
-    
+
     if not dep or dep["status"] != "pending":
         await query.edit_message_caption(caption="Already processed.")
         return
@@ -243,26 +356,26 @@ async def handle_admin_deposits(query, context, data):
         DB.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (dep["amount"], dep["user_id"]))
         DB.commit()
         await query.edit_message_caption(caption=f"✅ Deposit #{deposit_id} approved.")
-        await context.bot.send_message(dep["user_id"], f"✅ Your deposit of ₹{dep['amount']} has been approved and credited to your wallet.")
+        await context.bot.send_message(dep["user_id"], f"✅ Your deposit of ₹{dep['amount']} has been approved.")
     elif action == "rejdep":
         DB.execute("UPDATE deposits SET status='rejected' WHERE id=?", (deposit_id,))
         DB.commit()
         await query.edit_message_caption(caption=f"❌ Deposit #{deposit_id} rejected.")
-        await context.bot.send_message(dep["user_id"], "❌ Your deposit was rejected. Please contact the admin.")
+        await context.bot.send_message(dep["user_id"], "❌ Your deposit was rejected. Contact admin.")
 
 # ---------- Deposit Conversation ----------
 async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         amount = float(update.message.text)
     except ValueError:
-        await update.message.reply_text("⚠️ Please send a valid numeric amount.")
+        await update.message.reply_text("Please send a valid numeric amount.")
         return DEPOSIT_AMOUNT
-    
+
     context.user_data["deposit_amount"] = amount
-    
+
     if os.path.exists("qr_code.jpg"):
         with open("qr_code.jpg", "rb") as f:
-            await update.message.reply_photo(f, caption=f"Scan to pay ₹{amount}. Once done, reply with your payment screenshot or Transaction ID.")
+            await update.message.reply_photo(f, caption=f"Scan to pay ₹{amount}. Then send screenshot or transaction ID.")
     else:
         await update.message.reply_text(f"Please transfer ₹{amount} and reply with the Transaction ID.")
     return DEPOSIT_SCREENSHOT
@@ -272,7 +385,8 @@ async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
     amount = context.user_data.get("deposit_amount", 0)
     file_id = update.message.photo[-1].file_id if update.message.photo else update.message.text
 
-    cursor = DB.execute("INSERT INTO deposits (user_id, amount, screenshot_file_id) VALUES (?,?,?)", (user_id, amount, file_id))
+    cursor = DB.execute("INSERT INTO deposits (user_id, amount, screenshot_file_id) VALUES (?,?,?)",
+                        (user_id, amount, file_id))
     deposit_id = cursor.lastrowid
     DB.commit()
 
@@ -280,65 +394,76 @@ async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("✅ Approve", callback_data=f"appdep_{deposit_id}"),
          InlineKeyboardButton("❌ Reject", callback_data=f"rejdep_{deposit_id}")]
     ]
-    
+
     msg_text = f"Deposit #{deposit_id} by {user_id}\nAmount: ₹{amount}"
     if update.message.photo:
-        await context.bot.send_photo(ADMIN_ID, file_id, caption=msg_text, reply_markup=InlineKeyboardMarkup(admin_keyboard))
+        await context.bot.send_photo(ADMIN_ID, file_id, caption=msg_text,
+                                     reply_markup=InlineKeyboardMarkup(admin_keyboard))
     else:
-        await context.bot.send_message(ADMIN_ID, f"{msg_text}\nTxID: {file_id}", reply_markup=InlineKeyboardMarkup(admin_keyboard))
-    
-    await update.message.reply_text("✅ Deposit submitted successfully. The admin will verify and credit your account shortly.", reply_markup=get_main_menu())
+        await context.bot.send_message(ADMIN_ID, f"{msg_text}\nTxID: {file_id}",
+                                       reply_markup=InlineKeyboardMarkup(admin_keyboard))
+
+    await update.message.reply_text("✅ Deposit submitted. Admin will verify shortly.",
+                                    reply_markup=get_main_menu())
     return ConversationHandler.END
 
 # ---------- Email Creation Conversation ----------
 async def email_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     username = update.message.text.strip()
     if not re.match(r"^[a-zA-Z0-9._]{6,30}$", username):
-        await update.message.reply_text("⚠️ Invalid username. Use 6-30 letters, numbers, or dots.")
+        await update.message.reply_text("Invalid username. Use 6-30 letters, numbers, dots.")
         return EMAIL_USERNAME
     context.user_data["desired_email"] = username
-    await update.message.reply_text("🔑 Enter the password for the account (minimum 8 characters):")
+    await update.message.reply_text("Enter the password for the account (min 8 chars):")
     return EMAIL_PASSWORD
 
 async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     password = update.message.text.strip()
     if len(password) < 8:
-        await update.message.reply_text("⚠️ Password too short. Please use at least 8 characters:")
+        await update.message.reply_text("Password too short, min 8 characters. Try again:")
         return EMAIL_PASSWORD
-    
+
     user_id = update.effective_user.id
     desired = context.user_data["desired_email"]
     cost = 10.0
 
     DB.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (cost, user_id))
-    DB.execute("INSERT INTO email_orders (user_id, desired_email, password, cost) VALUES (?,?,?,?)", (user_id, desired, password, cost))
+    DB.execute("INSERT INTO email_orders (user_id, desired_email, password, cost) VALUES (?,?,?,?)",
+               (user_id, desired, password, cost))
     DB.commit()
 
-    msg = await update.message.reply_text("⏳ Queuing task...")
-    
+    msg = await update.message.reply_text("⏳ Initializing setup...")
+
     stop_event = asyncio.Event()
     bot_instance = context.bot
     asyncio.create_task(loading_animation(bot_instance, update.effective_chat.id, msg.message_id, stop_event))
-    asyncio.create_task(create_and_notify(bot_instance, update.effective_chat.id, msg.message_id, user_id, desired, password, stop_event))
-    
+    asyncio.create_task(create_and_notify(bot_instance, update.effective_chat.id, msg.message_id,
+                                          user_id, desired, password, stop_event))
+
     return ConversationHandler.END
 
-async def create_and_notify(bot, chat_id, message_id, user_id: int, email: str, pwd: str, stop_event: asyncio.Event):
+async def create_and_notify(bot, chat_id, message_id, user_id: int, email: str, pwd: str,
+                            stop_event: asyncio.Event):
     try:
         credentials = await create_gmail_account(email, pwd)
-        DB.execute("UPDATE email_orders SET status='completed' WHERE desired_email=? AND user_id=?", (email, user_id))
+        DB.execute("UPDATE email_orders SET status='completed' WHERE desired_email=? AND user_id=?",
+                   (email, user_id))
         DB.commit()
         stop_event.set()
-        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"🎉 **Account successfully created!**\n\n`{credentials}`", parse_mode="Markdown")
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
+                                    text=f"✅ Account created:\n`{credentials}`",
+                                    parse_mode="Markdown")
     except Exception as e:
         logging.error(f"Creation failed: {e}")
         stop_event.set()
         DB.execute("UPDATE users SET balance = balance + 10 WHERE user_id=?", (user_id,))
-        DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?", (email, user_id))
+        DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?",
+                   (email, user_id))
         DB.commit()
-        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"❌ **Creation Failed.**\nReason: {str(e)[:100]}\n\n₹10 has been refunded to your wallet.", parse_mode="Markdown")
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
+                                    text=f"❌ Creation failed: {str(e)[:100]}. Refunded ₹10.")
 
-# ---------- Main Execution ----------
+# ---------- Main ----------
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -363,7 +488,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(deposit_conv)
     application.add_handler(email_conv)
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(wallet|main_menu|appdep_|rejdep_).*"))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(login|wallet|main_menu|appdep_|rejdep_).*"))
 
     application.run_polling()
 
