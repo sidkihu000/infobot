@@ -22,10 +22,10 @@ from telegram.ext import (
 
 # Load environment
 load_dotenv()
-BOT_TOKEN = os.getenv("6935043231:AAFSnPWsC8ti9j3npYHFQZU8wABrN5knfDU")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
-SMS_API_KEY = os.getenv("eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE4MTQwODY4MzQsImlhdCI6MTc4MjU1MDgzNCwicmF5IjoiMjZjNjk2ZDMwMzNlOWVjMTFhNGRjYzkyODRhY2FiOWMiLCJzdWIiOjQyNjEwOTF9.c8Mej-NVTX_07Coiog4zUf6WRccQ3jlLMe5eB0yH5iTUbTUXpVwQwr6XYQxHc3k6Ecv6X14AmCcMxgL50ECUQ8XnhWXh2Fit0dyQ2axBjcpw3y9VC6VreKTdvA3uDBKOiHDQfZ6gBjMrHUjL3VGJZrtNLlFl--a6fm1TjOGAcvIEkQdtLCik1xEEUmZiH5ZcNEJvfZPoKCzTNtblFujbxBEu8V0aZ4KhS5wQ0LRPTHu7LYWPYY09eYgu-9hcOn_kuVLAc-4jMhcXi9mKyW1SGlHOw9AE01zrM52R4Rom9RRvMhJI97ZGWrpNyx2SG53BRZ-ccIKkbDeaTcwuNNzNeg")
-CAPTCHA_API_KEY = os.getenv("6LczKzgtAAAAAHjfrXwbQghhKiCOpYfmNhNMi9Nf")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+SMS_API_KEY = os.getenv("SMS_API_KEY")
+CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
 
 # States for conversations
 DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
@@ -69,46 +69,42 @@ DB.commit()
 # Enable logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# ---------- Number Panel (5sim) Helpers ----------
+# ---------- Number Panel (5sim) Helpers (using httpx) ----------
 SIM_API_BASE = "https://5sim.net/v1/user"
 
 async def get_balance() -> float:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{SIM_API_BASE}/profile", headers={"Authorization": f"Bearer {SMS_API_KEY}"}) as resp:
-            data = await resp.json()
-            return float(data.get("balance", 0))
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{SIM_API_BASE}/profile",
+                                headers={"Authorization": f"Bearer {SMS_API_KEY}"})
+        data = resp.json()
+        return float(data.get("balance", 0))
 
 async def buy_activation() -> dict:
     """Buy a Google activation, return {id, phone}"""
-    params = {
-        "country": "any",
-        "operator": "any",
-        "product": "google",
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{SIM_API_BASE}/buy/activation/google/any/any",
-                               headers={"Authorization": f"Bearer {SMS_API_KEY}"}) as resp:
-            data = await resp.json()
-            if "id" not in data:
-                raise Exception("No numbers available")
-            return {"id": data["id"], "phone": data["phone"]}
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{SIM_API_BASE}/buy/activation/google/any/any",
+                                headers={"Authorization": f"Bearer {SMS_API_KEY}"})
+        data = resp.json()
+        if "id" not in data:
+            raise Exception("No numbers available")
+        return {"id": data["id"], "phone": data["phone"]}
 
 async def get_sms(activation_id: str) -> str:
     """Poll for SMS code up to 10 times (20s interval)"""
     for _ in range(10):
         await asyncio.sleep(20)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{SIM_API_BASE}/check/{activation_id}",
-                                   headers={"Authorization": f"Bearer {SMS_API_KEY}"}) as resp:
-                data = await resp.json()
-                if data.get("status") == "RECEIVED" and data.get("sms"):
-                    return data["sms"][0]["code"]
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{SIM_API_BASE}/check/{activation_id}",
+                                    headers={"Authorization": f"Bearer {SMS_API_KEY}"})
+            data = resp.json()
+            if data.get("status") == "RECEIVED" and data.get("sms"):
+                return data["sms"][0]["code"]
     raise TimeoutError("SMS not received")
 
 async def cancel_activation(activation_id: str):
-    async with aiohttp.ClientSession() as session:
-        await session.get(f"{SIM_API_BASE}/cancel/{activation_id}",
-                          headers={"Authorization": f"Bearer {SMS_API_KEY}"})
+    async with httpx.AsyncClient() as client:
+        await client.get(f"{SIM_API_BASE}/cancel/{activation_id}",
+                         headers={"Authorization": f"Bearer {SMS_API_KEY}"})
 
 # ---------- Gmail Creation Engine (Playwright) ----------
 async def solve_captcha(page) -> None:
@@ -149,8 +145,6 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             await page.wait_for_timeout(3000)
 
             # Phone entry
-            # Sometimes Google asks for phone immediately, sometimes after some screens.
-            # We look for phone input field.
             phone_input = await page.wait_for_selector('input[type="tel"]', timeout=15000)
             await phone_input.fill(phone_number)
             await page.click('button:has-text("Next")')
@@ -172,9 +166,9 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             await browser.close()
 
         # Report success to 5sim (finish activation)
-        async with aiohttp.ClientSession() as session:
-            await session.get(f"{SIM_API_BASE}/finish/{activation_id}",
-                              headers={"Authorization": f"Bearer {SMS_API_KEY}"})
+        async with httpx.AsyncClient() as client:
+            await client.get(f"{SIM_API_BASE}/finish/{activation_id}",
+                             headers={"Authorization": f"Bearer {SMS_API_KEY}"})
 
         return f"{desired_username}@gmail.com:{password}"
 
@@ -182,7 +176,7 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
         await cancel_activation(activation_id)
         raise e
 
-# ---------- Bot Handlers ----------
+# ---------- Bot Handlers (unchanged logic) ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
         [InlineKeyboardButton("📧 Email Create", callback_data="email_create")],
@@ -377,7 +371,7 @@ def main():
             DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, deposit_amount)],
             DEPOSIT_SCREENSHOT: [MessageHandler(filters.PHOTO | filters.TEXT & ~filters.COMMAND, deposit_screenshot)],
         },
-        fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)],
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
     )
 
     # Conversation: email creation
@@ -387,7 +381,7 @@ def main():
             EMAIL_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, email_username)],
             EMAIL_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, email_password)],
         },
-        fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)],
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
     )
 
     application.add_handler(CommandHandler("start", start))
