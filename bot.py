@@ -25,7 +25,9 @@ from telegram.ext import (
 load_dotenv()
 BOT_TOKEN = "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
-SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9...")
+
+# FIXED: Restored your full, original SMS_API_KEY instead of the shortened version
+SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE4MTQwODY4MzQsImlhdCI6MTc4MjU1MDgzNCwicmF5IjoiMjZjNjk2ZDMwMzNlOWVjMTFhNGRjYzkyODRhY2FiOWMiLCJzdWIiOjQyNjEwOTF9.c8Mej-NVTX_07Coiog4zUf6WRccQ3jlLMe5eB0yH5iTUbTUXpVwQwr6XYQxHc3k6Ecv6X14AmCcMxgL50ECUQ8XnhWXh2Fit0dyQ2axBjcpw3y9VC6VreKTdvA3uDBKOiHDQfZ6gBjMrHUjL3VGJZrtNLlFl--a6fm1TjOGAcvIEkQdtLCik1xEEUmZiH5ZcNEJvfZPoKCzTNtblFujbxBEu8V0aZ4KhS5wQ0LRPTHu7LYWPYY09eYgu-9hcOn_kuVLAc-4jMhcXi9mKyW1SGlHOw9AE01zrM52R4Rom9RRvMhJI97ZGWrpNyx2SG53BRZ-ccIKkbDeaTcwuNNzNeg")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6LczKzgtAAAAAHjfrXwbQghhKiCOpYfmNhNMi9Nf")
 # Clean the proxy URL (remove accidental quotes/spaces)
 PROXY_URL = os.getenv("PROXY_URL", "").strip().strip('"').strip("'")
@@ -92,11 +94,15 @@ def parse_proxy_url(url: str) -> dict | None:
 
 # ---------- Safe JSON helper ----------
 async def safe_json_response(response) -> dict:
-    # FIXED: response.text is a property in httpx, not an awaitable method
     text = response.text
     if not text.strip():
-        logger.error(f"Empty response from {response.url}")
-        raise Exception("API returned empty response")
+        logger.error(f"Empty response from {response.url}. Status: {response.status_code}")
+        raise Exception(f"API returned empty response (HTTP {response.status_code})")
+    
+    # Sometimes 5sim returns plain text error messages instead of JSON
+    if response.status_code != 200 and not text.startswith("{"):
+        raise Exception(f"5sim Error: {text.strip()}")
+        
     try:
         return response.json()
     except Exception:
@@ -110,7 +116,7 @@ async def buy_activation() -> dict:
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{SIM_API_BASE}/buy/activation/google/any/any",
-            headers={"Authorization": f"Bearer {SMS_API_KEY}"}
+            headers={"Authorization": f"Bearer {SMS_API_KEY}", "Accept": "application/json"}
         )
         data = await safe_json_response(resp)
         if "id" not in data:
@@ -124,7 +130,7 @@ async def get_sms(activation_id: str) -> str:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{SIM_API_BASE}/check/{activation_id}",
-                headers={"Authorization": f"Bearer {SMS_API_KEY}"}
+                headers={"Authorization": f"Bearer {SMS_API_KEY}", "Accept": "application/json"}
             )
             data = await safe_json_response(resp)
             if data.get("status") == "RECEIVED" and data.get("sms"):
@@ -135,7 +141,7 @@ async def cancel_activation(activation_id: str):
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{SIM_API_BASE}/cancel/{activation_id}",
-            headers={"Authorization": f"Bearer {SMS_API_KEY}"}
+            headers={"Authorization": f"Bearer {SMS_API_KEY}", "Accept": "application/json"}
         )
         try:
             await safe_json_response(resp)
