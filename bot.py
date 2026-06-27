@@ -25,12 +25,10 @@ from telegram.ext import (
 load_dotenv()
 BOT_TOKEN = "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
-
-# FIXED: Restored your full, original SMS_API_KEY instead of the shortened version
-SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE4MTQwODY4MzQsImlhdCI6MTc4MjU1MDgzNCwicmF5IjoiMjZjNjk2ZDMwMzNlOWVjMTFhNGRjYzkyODRhY2FiOWMiLCJzdWIiOjQyNjEwOTF9.c8Mej-NVTX_07Coiog4zUf6WRccQ3jlLMe5eB0yH5iTUbTUXpVwQwr6XYQxHc3k6Ecv6X14AmCcMxgL50ECUQ8XnhWXh2Fit0dyQ2axBjcpw3y9VC6VreKTdvA3uDBKOiHDQfZ6gBjMrHUjL3VGJZrtNLlFl--a6fm1TjOGAcvIEkQdtLCik1xEEUmZiH5ZcNEJvfZPoKCzTNtblFujbxBEu8V0aZ4KhS5wQ0LRPTHu7LYWPYY09eYgu-9hcOn_kuVLAc-4jMhcXi9mKyW1SGlHOw9AE01zrM52R4Rom9RRvMhJI97ZGWrpNyx2SG53BRZ-ccIKkbDeaTcwuNNzNeg")
+# SMSPool API key - get from https://smspool.net/account/api
+SMSPOOL_API_KEY = os.getenv("SMSPOOL_API_KEY", "6xACy0wYLn4Sz548sTBeC216IEZ2OICB")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6LczKzgtAAAAAHjfrXwbQghhKiCOpYfmNhNMi9Nf")
-# Clean the proxy URL (remove accidental quotes/spaces)
-PROXY_URL = os.getenv("PROXY_URL", "").strip().strip('"').strip("'")
+PROXY_URL = os.getenv("PROXY_URL", "")  # Optional residential proxy
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -81,77 +79,94 @@ def parse_proxy_url(url: str) -> dict | None:
     try:
         parsed = urlparse(url)
         if not parsed.hostname:
-            raise ValueError("Invalid proxy URL – no hostname")
+            return None
         config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port or 80}"}
         if parsed.username:
             config["username"] = parsed.username
         if parsed.password:
             config["password"] = parsed.password
         return config
-    except Exception as e:
-        logger.warning(f"Could not parse proxy URL: {url} – {e}")
+    except Exception:
         return None
 
 # ---------- Safe JSON helper ----------
 async def safe_json_response(response) -> dict:
-    text = response.text
+    text = await response.text()
     if not text.strip():
-        logger.error(f"Empty response from {response.url}. Status: {response.status_code}")
-        raise Exception(f"API returned empty response (HTTP {response.status_code})")
-    
-    # Sometimes 5sim returns plain text error messages instead of JSON
-    if response.status_code != 200 and not text.startswith("{"):
-        raise Exception(f"5sim Error: {text.strip()}")
-        
+        logger.error(f"Empty response from {response.url}")
+        raise Exception("API returned empty response")
     try:
         return response.json()
     except Exception:
         logger.error(f"Invalid JSON from {response.url}: {text[:500]}")
         raise Exception("API returned invalid JSON")
 
-# ---------- Number Panel (5sim) Helpers ----------
-SIM_API_BASE = "https://5sim.net/v1/user"
+# =====================================================================
+#  SMSPool.NET Integration (Replaces 5sim)
+# =====================================================================
+SMSPOOL_BASE = "https://api.smspool.net"
 
-async def buy_activation() -> dict:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{SIM_API_BASE}/buy/activation/google/any/any",
-            headers={"Authorization": f"Bearer {SMS_API_KEY}", "Accept": "application/json"}
-        )
+async def rent_smspool_number() -> dict:
+    """
+    Rent a USA number for Google verification.
+    Returns { "order_id": "abc123", "number": "+1 234 567 8900" }
+    """
+    params = {
+        "key": SMSPOOL_API_KEY,
+        "country": "United States",   # Best success rate for Google
+        "service": "Google",
+        "pool": "1",                  # 1 = fast pool
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(f"{SMSPOOL_BASE}/purchase/1", data=params)
         data = await safe_json_response(resp)
-        if "id" not in data:
-            logger.error(f"5sim buy error: {data}")
-            raise Exception("No numbers available")
-        return {"id": data["id"], "phone": data["phone"]}
+        if data.get("success") != 1:
+            logger.error(f"SMSPool rent error: {data}")
+            raise Exception(f"Failed to rent number: {data.get('message', 'Unknown error')}")
+        return {
+            "order_id": data["order_id"],
+            "number": data["number"].replace(" ", ""),  # remove spaces
+        }
 
-async def get_sms(activation_id: str) -> str:
-    for _ in range(10):
+async def get_smspool_sms(order_id: str) -> str:
+    """Poll for SMS code up to 15 times (20s interval)"""
+    for _ in range(15):
         await asyncio.sleep(20)
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{SIM_API_BASE}/check/{activation_id}",
-                headers={"Authorization": f"Bearer {SMS_API_KEY}", "Accept": "application/json"}
-            )
+        params = {
+            "key": SMSPOOL_API_KEY,
+            "orderid": order_id,
+            "smstype": "1",  # Get only first SMS
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(f"{SMSPOOL_BASE}/sms/1", params=params)
             data = await safe_json_response(resp)
-            if data.get("status") == "RECEIVED" and data.get("sms"):
-                return data["sms"][0]["code"]
-    raise TimeoutError("SMS not received in time")
+            if data.get("status") == 1 and data.get("sms"):
+                # SMSPool returns number in format "+1234567890"
+                sms_text = data["sms"]
+                # Extract OTP code (usually 6 digits)
+                match = re.search(r'(\d{4,8})', sms_text)
+                if match:
+                    return match.group(1)
+                return sms_text  # fallback – return whole SMS
+    raise TimeoutError("SMS not received within 5 minutes")
 
-async def cancel_activation(activation_id: str):
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{SIM_API_BASE}/cancel/{activation_id}",
-            headers={"Authorization": f"Bearer {SMS_API_KEY}", "Accept": "application/json"}
-        )
+async def cancel_smspool_number(order_id: str):
+    """Cancel the rented number to save money"""
+    params = {
+        "key": SMSPOOL_API_KEY,
+        "orderid": order_id,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
         try:
-            await safe_json_response(resp)
+            await client.get(f"{SMSPOOL_BASE}/cancel/1", params=params)
+            logger.info(f"Cancelled SMSPool order {order_id}")
         except Exception as e:
-            logger.warning(f"Cancel activation failed (non-critical): {e}")
+            logger.warning(f"Failed to cancel SMSPool order {order_id}: {e}")
 
-# ---------- CAPTCHA Solver (2Captcha) – safe injection ----------
+# ---------- CAPTCHA Solver (2Captcha) ----------
 async def solve_captcha(page) -> str:
-    if not CAPTCHA_API_KEY:
-        logger.warning("CAPTCHA_API_KEY not set")
+    if not CAPTCHA_API_KEY or "your_2captcha" in CAPTCHA_API_KEY:
+        logger.warning("CAPTCHA_API_KEY not set or using placeholder")
         return None
 
     url = page.url
@@ -172,61 +187,79 @@ async def solve_captcha(page) -> str:
         logger.info("No reCAPTCHA sitekey found")
         return None
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.get("https://2captcha.com/in.php", params={
+    async with httpx.AsyncClient(timeout=120) as client:
+        # Create task
+        params = {
             "key": CAPTCHA_API_KEY,
             "method": "userrecaptcha",
             "googlekey": sitekey,
             "pageurl": url,
             "json": 1,
-        })
+        }
+        resp = await client.get("https://2captcha.com/in.php", params=params)
         result = await safe_json_response(resp)
         if result.get("status") != 1:
             logger.error(f"2Captcha create error: {result}")
             return None
         task_id = result["request"]
+        logger.info(f"2Captcha task created: {task_id}")
 
-        for _ in range(20):
-            await asyncio.sleep(5)
-            resp = await client.get("https://2captcha.com/res.php", params={
+        # Poll for solution
+        for attempt in range(30):
+            await asyncio.sleep(10)
+            params = {
                 "key": CAPTCHA_API_KEY,
                 "action": "get",
                 "id": task_id,
                 "json": 1,
-            })
+            }
+            resp = await client.get("https://2captcha.com/res.php", params=params)
             data = await safe_json_response(resp)
             if data.get("status") == 1:
                 token = data["request"]
+                logger.info("CAPTCHA solved successfully")
+                # Inject token into page
                 try:
                     await page.evaluate(f'''
-                        const textarea = document.getElementById('g-recaptcha-response');
-                        if (textarea) textarea.value = "{token}";
-                        const callback = document.getElementById('g-recaptcha-response').getAttribute('data-callback');
+                        var textarea = document.getElementById('g-recaptcha-response');
+                        if (textarea) {{
+                            textarea.value = "{token}";
+                            textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }}
+                        var callback = document.getElementById('g-recaptcha-response').getAttribute('data-callback');
                         if (callback && typeof window[callback] === 'function') {{
                             window[callback]("{token}");
-                        }} else {{
-                            const form = document.querySelector('form');
-                            if (form) form.submit();
                         }}
                     ''')
-                    logger.info("CAPTCHA solved and injected")
+                    logger.info("CAPTCHA token injected")
                 except Exception as e:
-                    logger.error(f"CAPTCHA injection script failed: {e}")
+                    logger.exception("CAPTCHA injection error")
                 return token
             if data.get("request") == "ERROR_CAPTCHA_UNSOLVABLE":
-                logger.error("Captcha unsolvable")
+                logger.error("CAPTCHA marked unsolvable by 2Captcha")
                 return None
     return None
 
-# ---------- Gmail Creation Engine ----------
+# =====================================================================
+#  Gmail Creation Engine (Hybrid: SMSPool + Playwright)
+# =====================================================================
 async def create_gmail_account(desired_username: str, password: str) -> str:
-    activation = await buy_activation()
-    phone_number = activation["phone"]
-    activation_id = activation["id"]
-    logger.info(f"Got phone: {phone_number} (ID: {activation_id})")
+    """
+    Creates a Gmail account using:
+    1. SMSPool for phone verification
+    2. Playwright for form automation
+    3. 2Captcha for CAPTCHA solving
+    4. Optional proxy for IP rotation
+    """
+    # Step 1: Rent a phone number from SMSPool
+    rental = await rent_smspool_number()
+    phone_number = rental["number"]
+    order_id = rental["order_id"]
+    logger.info(f"Rented phone number from SMSPool: {phone_number} (Order: {order_id})")
 
     try:
         async with async_playwright() as p:
+            # Browser launch with stealth arguments
             launch_args = [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
@@ -234,9 +267,6 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
-                "--disable-background-timer-throttling",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-renderer-backgrounding",
             ]
             browser = await p.chromium.launch(headless=True, args=launch_args)
 
@@ -245,18 +275,16 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
 
-            # Apply proxy safely
+            # Apply proxy if configured
             proxy_config = parse_proxy_url(PROXY_URL)
             if proxy_config:
-                try:
-                    context_options["proxy"] = proxy_config
-                    logger.info(f"Using proxy: {proxy_config['server']}")
-                except Exception as e:
-                    logger.warning(f"Proxy configuration failed, continuing without proxy: {e}")
+                context_options["proxy"] = proxy_config
+                logger.info(f"Using proxy: {proxy_config['server']}")
 
             context = await browser.new_context(**context_options)
             page = await context.new_page()
 
+            # Stealth injection
             await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -270,88 +298,119 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                 );
             """)
 
-            await asyncio.sleep(random.uniform(2, 4))
+            # Navigate to Google signup
+            logger.info("Navigating to Google signup page...")
             await page.goto(
                 "https://accounts.google.com/signup/v2/webcreateaccount?flowName=GlifWebSignIn&flowEntry=SignUp",
-                wait_until="networkidle"
+                wait_until="networkidle",
+                timeout=60000
             )
+            await asyncio.sleep(random.uniform(2, 4))
             logger.info("Signup page loaded")
 
+            # Fill personal info
             await page.fill('input[name="firstName"]', "John")
-            await asyncio.sleep(random.uniform(0.5, 1.5))
-            await page.fill('input[name="lastName"]', "Doe")
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(0.8, 1.5))
+            await page.fill('input[name="lastName"]', "Smith")
+            await asyncio.sleep(random.uniform(0.8, 1.5))
+            logger.info(f"Filling username: {desired_username}")
+
+            # Fill username
             await page.fill('input[name="Username"]', desired_username)
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(1, 2))
+
+            # Fill password
             await page.fill('input[name="Passwd"]', password)
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(0.5, 1))
             await page.fill('input[name="ConfirmPasswd"]', password)
-            await asyncio.sleep(random.uniform(0.5, 1.5))
-            await page.mouse.move(random.randint(100, 500), random.randint(100, 400))
+            await asyncio.sleep(random.uniform(0.5, 1))
 
-            await page.click('button:has-text("Next"):not([disabled])')
-            logger.info("Clicked Next after form fill")
+            # Click Next
+            await page.click('button:has-text("Next")')
             await page.wait_for_timeout(4000)
+            logger.info("Clicked Next after form fill")
 
-            captcha_attempts = 0
-            while captcha_attempts < 2:
+            # CAPTCHA handling
+            for attempt in range(2):
                 if await page.is_visible('iframe[src*="google.com/recaptcha"]'):
-                    logger.info("CAPTCHA detected, solving...")
+                    logger.info(f"CAPTCHA detected (attempt {attempt + 1}/2)...")
                     token = await solve_captcha(page)
                     if token:
-                        await page.click('button:has-text("Next"):not([disabled])')
+                        await page.click('button:has-text("Next")')
                         await page.wait_for_timeout(3000)
+                        break
                     else:
-                        logger.warning("CAPTCHA solving failed, refreshing")
+                        logger.warning("CAPTCHA solving failed, refreshing...")
                         await page.reload(wait_until="networkidle")
-                        captcha_attempts += 1
+                        await asyncio.sleep(3)
                         continue
-                break
+                else:
+                    logger.info("No CAPTCHA detected")
+                    break
 
-            phone_input = await page.wait_for_selector('input[type="tel"]', timeout=30000)
-            await phone_input.fill(phone_number)
-            await page.click('button:has-text("Next"):not([disabled])')
-            logger.info("Phone number submitted")
+            # Phone number entry
+            logger.info(f"Entering phone number: {phone_number}")
+            try:
+                phone_input = await page.wait_for_selector('input[type="tel"]', timeout=30000)
+                await phone_input.fill(phone_number)
+                await page.click('button:has-text("Next")')
+                logger.info("Phone number submitted")
+            except Exception as e:
+                logger.error(f"Phone entry failed: {e}")
+                # Try alternative selector
+                phone_input = await page.wait_for_selector('input[type="tel"], input[aria-label*="phone"]', timeout=10000)
+                await phone_input.fill(phone_number)
+                await page.click('button:has-text("Next")')
 
-            code = await get_sms(activation_id)
-            logger.info(f"Got SMS code: {code}")
+            # Wait for SMS code from SMSPool
+            logger.info("Waiting for SMS code from SMSPool...")
+            code = await get_smspool_sms(order_id)
+            logger.info(f"Received SMS code: {code}")
+
+            # Enter verification code
             code_input = await page.wait_for_selector('input[type="tel"]', timeout=30000)
             await code_input.fill(code)
-            await page.click('button:has-text("Next"):not([disabled])')
+            await page.click('button:has-text("Next")')
+            logger.info("Verification code submitted")
 
+            # Handle post-verification screens
             try:
+                # "I agree" button (privacy/terms)
                 await page.wait_for_selector('button:has-text("I agree")', timeout=5000)
-                await page.click('button:has-text("I agree"):not([disabled])')
+                await page.click('button:has-text("I agree")')
                 await page.wait_for_timeout(2000)
+                logger.info("Clicked 'I agree'")
             except Exception:
-                pass
-            try:
-                await page.click('button:has-text("Next"):not([disabled])', timeout=5000)
-                await page.wait_for_timeout(2000)
-            except Exception:
-                pass
+                logger.info("No 'I agree' button")
 
+            try:
+                # Final Next button
+                await page.wait_for_selector('button:has-text("Next")', timeout=5000)
+                await page.click('button:has-text("Next")')
+                await page.wait_for_timeout(3000)
+                logger.info("Clicked final Next")
+            except Exception:
+                logger.info("No final Next button")
+
+            # Check if account was created successfully
             await page.wait_for_timeout(5000)
+            current_url = page.url
+            if "myaccount.google.com" in current_url or "accounts.google.com/signin" in current_url:
+                logger.info("Account creation successful!")
+            else:
+                logger.warning(f"Unexpected URL after creation: {current_url}")
+
             await browser.close()
             logger.info("Browser closed")
 
-        async with httpx.AsyncClient() as client:
-            await client.get(
-                f"{SIM_API_BASE}/finish/{activation_id}",
-                headers={"Authorization": f"Bearer {SMS_API_KEY}"}
-            )
-            logger.info("Activation finished")
-
+        # Finalize SMSPool order
+        logger.info(f"Gmail account created: {desired_username}@gmail.com")
         return f"{desired_username}@gmail.com:{password}"
 
     except Exception as e:
-        logger.exception("Gmail creation error")
-        try:
-            if 'page' in locals():
-                await page.screenshot(path="error_screenshot.png")
-        except Exception:
-            pass
-        await cancel_activation(activation_id)
+        logger.exception("Gmail creation failed")
+        # Cancel SMSPool number to avoid charges
+        await cancel_smspool_number(order_id)
         raise e
 
 # ---------- UI Animation ----------
@@ -359,8 +418,8 @@ async def loading_animation(bot, chat_id, message_id, stop_event: asyncio.Event)
     frames = [
         "🕛 Creating account...",
         "🕒 Processing details...",
-        "🕕 Fetching number...",
-        "🕘 Verifying SMS..."
+        "🕕 Renting phone number...",
+        "🕘 Verifying SMS code..."
     ]
     try:
         while not stop_event.is_set():
@@ -368,7 +427,7 @@ async def loading_animation(bot, chat_id, message_id, stop_event: asyncio.Event)
                 if stop_event.is_set():
                     break
                 await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=frame)
-                await asyncio.sleep(1)
+                await asyncio.sleep(1.2)
     except Exception as e:
         logger.error(f"Animation error: {e}")
 
@@ -553,19 +612,19 @@ async def create_and_notify(bot, chat_id, message_id, user_id: int, email: str, 
         DB.commit()
         stop_event.set()
         await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
-                                    text=f"✅ Account created:\n`{credentials}`",
+                                    text=f"✅ Account created successfully:\n`{credentials}`",
                                     parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Creation failed for {email}: {e}")
+        logger.exception("Account creation failed")
         stop_event.set()
         DB.execute("UPDATE users SET balance = balance + 10 WHERE user_id=?", (user_id,))
         DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?",
                    (email, user_id))
         DB.commit()
-        # Show only the first 150 chars of the error
-        error_msg = str(e)[:150]
+        error_msg = str(e)[:200]
         await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
-                                    text=f"❌ Creation failed: {error_msg}. Refunded ₹10.")
+                                    text=f"❌ Creation failed: {error_msg}\nRefunded ₹10.",
+                                    reply_markup=get_main_menu())
 
 # ---------- Main ----------
 def main():
