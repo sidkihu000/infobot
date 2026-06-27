@@ -134,7 +134,7 @@ async def cancel_activation(activation_id: str):
         except Exception as e:
             logger.warning(f"Cancel activation failed (non-critical): {e}")
 
-# ---------- CAPTCHA Solver (2Captcha) ----------
+# ---------- CAPTCHA Solver (2Captcha) – with safe injection ----------
 async def solve_captcha(page) -> str:
     if not CAPTCHA_API_KEY:
         logger.warning("CAPTCHA_API_KEY not set")
@@ -183,18 +183,22 @@ async def solve_captcha(page) -> str:
             data = await safe_json_response(resp)
             if data.get("status") == 1:
                 token = data["request"]
-                await page.evaluate(f'''
-                    const textarea = document.getElementById('g-recaptcha-response');
-                    if (textarea) textarea.value = "{token}";
-                    const callback = document.getElementById('g-recaptcha-response').getAttribute('data-callback');
-                    if (callback && typeof window[callback] === 'function') {{
-                        window[callback]("{token}");
-                    }} else {{
-                        const form = document.querySelector('form');
-                        if (form) form.requestSubmit();
-                    }}
-                ''')
-                logger.info("CAPTCHA solved")
+                # Inject the token safely – catch any JS error
+                try:
+                    await page.evaluate(f'''
+                        const textarea = document.getElementById('g-recaptcha-response');
+                        if (textarea) textarea.value = "{token}";
+                        const callback = document.getElementById('g-recaptcha-response').getAttribute('data-callback');
+                        if (callback && typeof window[callback] === 'function') {{
+                            window[callback]("{token}");
+                        }} else {{
+                            const form = document.querySelector('form');
+                            if (form) form.submit();
+                        }}
+                    ''')
+                    logger.info("CAPTCHA solved and injected")
+                except Exception as e:
+                    logger.error(f"CAPTCHA injection script failed: {e}")
                 return token
             if data.get("request") == "ERROR_CAPTCHA_UNSOLVABLE":
                 logger.error("Captcha unsolvable")
@@ -228,7 +232,6 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
 
-            # Parse and apply proxy from PROXY_URL
             proxy_config = parse_proxy_url(PROXY_URL)
             if proxy_config:
                 context_options["proxy"] = proxy_config
@@ -237,7 +240,6 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             context = await browser.new_context(**context_options)
             page = await context.new_page()
 
-            # Stealth injection
             await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -258,7 +260,6 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             )
             logger.info("Signup page loaded")
 
-            # Fill in form with random pauses
             await page.fill('input[name="firstName"]', "John")
             await asyncio.sleep(random.uniform(0.5, 1.5))
             await page.fill('input[name="lastName"]', "Doe")
@@ -275,7 +276,6 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             logger.info("Clicked Next after form fill")
             await page.wait_for_timeout(4000)
 
-            # CAPTCHA handling
             captcha_attempts = 0
             while captcha_attempts < 2:
                 if await page.is_visible('iframe[src*="google.com/recaptcha"]'):
@@ -302,7 +302,6 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             await code_input.fill(code)
             await page.click('button:has-text("Next"):not([disabled])')
 
-            # Skip recovery / agree
             try:
                 await page.wait_for_selector('button:has-text("I agree")', timeout=5000)
                 await page.click('button:has-text("I agree"):not([disabled])')
@@ -319,7 +318,6 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             await browser.close()
             logger.info("Browser closed")
 
-        # Finish activation
         async with httpx.AsyncClient() as client:
             await client.get(
                 f"{SIM_API_BASE}/finish/{activation_id}",
@@ -404,7 +402,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return DEPOSIT_AMOUNT
 
     elif data == "email_create":
-        # Always start the conversation – checks happen later
         await query.edit_message_text("Enter desired email username (without @gmail.com):")
         return EMAIL_USERNAME
 
@@ -507,7 +504,6 @@ async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     desired = context.user_data["desired_email"]
     cost = 10.0
 
-    # Check login and balance here
     user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
     if not user:
         await update.message.reply_text("❌ You are not logged in. Please login first.", reply_markup=get_main_menu())
@@ -516,7 +512,6 @@ async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"❌ Insufficient balance. You need ₹{cost}. Please deposit.", reply_markup=get_main_menu())
         return ConversationHandler.END
 
-    # Deduct and start creation
     DB.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (cost, user_id))
     DB.execute("INSERT INTO email_orders (user_id, desired_email, password, cost) VALUES (?,?,?,?)",
                (user_id, desired, password, cost))
