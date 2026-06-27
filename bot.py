@@ -5,6 +5,7 @@ import re
 import random
 import sqlite3
 from datetime import datetime
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -31,7 +32,7 @@ PROXY_URL = os.getenv("PROXY_URL", "")
 # ---------- Logging ----------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO   # Change to logging.DEBUG for more detail
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -70,16 +71,42 @@ CREATE TABLE IF NOT EXISTS email_orders (
 """)
 DB.commit()
 
+# ---------- Proxy parser ----------
+def parse_proxy_url(url: str) -> dict | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port or 80}"}
+    if parsed.username:
+        config["username"] = parsed.username
+    if parsed.password:
+        config["password"] = parsed.password
+    return config
+
+# ---------- Safe JSON helper ----------
+async def safe_json_response(response) -> dict:
+    text = await response.text()
+    if not text.strip():
+        logger.error(f"Empty response from {response.url}")
+        raise Exception("API returned empty response")
+    try:
+        return response.json()
+    except Exception:
+        logger.error(f"Invalid JSON from {response.url}: {text[:500]}")
+        raise Exception("API returned invalid JSON")
+
 # ---------- Number Panel (5sim) Helpers ----------
 SIM_API_BASE = "https://5sim.net/v1/user"
 
 async def buy_activation() -> dict:
     async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{SIM_API_BASE}/buy/activation/google/any/any",
-                                headers={"Authorization": f"Bearer {SMS_API_KEY}"})
-        data = resp.json()
+        resp = await client.get(
+            f"{SIM_API_BASE}/buy/activation/google/any/any",
+            headers={"Authorization": f"Bearer {SMS_API_KEY}"}
+        )
+        data = await safe_json_response(resp)
         if "id" not in data:
-            logger.error(f"5sim buy response: {data}")
+            logger.error(f"5sim buy error: {data}")
             raise Exception("No numbers available")
         return {"id": data["id"], "phone": data["phone"]}
 
@@ -87,22 +114,30 @@ async def get_sms(activation_id: str) -> str:
     for _ in range(10):
         await asyncio.sleep(20)
         async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{SIM_API_BASE}/check/{activation_id}",
-                                    headers={"Authorization": f"Bearer {SMS_API_KEY}"})
-            data = resp.json()
+            resp = await client.get(
+                f"{SIM_API_BASE}/check/{activation_id}",
+                headers={"Authorization": f"Bearer {SMS_API_KEY}"}
+            )
+            data = await safe_json_response(resp)
             if data.get("status") == "RECEIVED" and data.get("sms"):
                 return data["sms"][0]["code"]
     raise TimeoutError("SMS not received in time")
 
 async def cancel_activation(activation_id: str):
     async with httpx.AsyncClient() as client:
-        await client.get(f"{SIM_API_BASE}/cancel/{activation_id}",
-                         headers={"Authorization": f"Bearer {SMS_API_KEY}"})
+        resp = await client.get(
+            f"{SIM_API_BASE}/cancel/{activation_id}",
+            headers={"Authorization": f"Bearer {SMS_API_KEY}"}
+        )
+        try:
+            await safe_json_response(resp)
+        except Exception as e:
+            logger.warning(f"Cancel activation failed (non-critical): {e}")
 
 # ---------- CAPTCHA Solver (2Captcha) ----------
 async def solve_captcha(page) -> str:
     if not CAPTCHA_API_KEY:
-        logger.warning("CAPTCHA_API_KEY not set – cannot solve captcha")
+        logger.warning("CAPTCHA_API_KEY not set")
         return None
 
     url = page.url
@@ -131,7 +166,7 @@ async def solve_captcha(page) -> str:
             "pageurl": url,
             "json": 1,
         })
-        result = resp.json()
+        result = await safe_json_response(resp)
         if result.get("status") != 1:
             logger.error(f"2Captcha create error: {result}")
             return None
@@ -145,7 +180,7 @@ async def solve_captcha(page) -> str:
                 "id": task_id,
                 "json": 1,
             })
-            data = resp.json()
+            data = await safe_json_response(resp)
             if data.get("status") == 1:
                 token = data["request"]
                 await page.evaluate(f'''
@@ -159,7 +194,7 @@ async def solve_captcha(page) -> str:
                         if (form) form.requestSubmit();
                     }}
                 ''')
-                logger.info("CAPTCHA solved and token injected")
+                logger.info("CAPTCHA solved")
                 return token
             if data.get("request") == "ERROR_CAPTCHA_UNSOLVABLE":
                 logger.error("Captcha unsolvable")
@@ -192,11 +227,17 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                 "viewport": {"width": 1280, "height": 800},
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
-            if PROXY_URL:
-                context_options["proxy"] = {"server": PROXY_URL}
+
+            # Parse and apply proxy from PROXY_URL
+            proxy_config = parse_proxy_url(PROXY_URL)
+            if proxy_config:
+                context_options["proxy"] = proxy_config
+                logger.info(f"Using proxy: {proxy_config['server']}")
+
             context = await browser.new_context(**context_options)
             page = await context.new_page()
 
+            # Stealth injection
             await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -211,9 +252,13 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             """)
 
             await asyncio.sleep(random.uniform(2, 4))
-            await page.goto("https://accounts.google.com/signup/v2/webcreateaccount?flowName=GlifWebSignIn&flowEntry=SignUp", wait_until="networkidle")
+            await page.goto(
+                "https://accounts.google.com/signup/v2/webcreateaccount?flowName=GlifWebSignIn&flowEntry=SignUp",
+                wait_until="networkidle"
+            )
             logger.info("Signup page loaded")
 
+            # Fill in form with random pauses
             await page.fill('input[name="firstName"]', "John")
             await asyncio.sleep(random.uniform(0.5, 1.5))
             await page.fill('input[name="lastName"]', "Doe")
@@ -230,6 +275,7 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             logger.info("Clicked Next after form fill")
             await page.wait_for_timeout(4000)
 
+            # CAPTCHA handling
             captcha_attempts = 0
             while captcha_attempts < 2:
                 if await page.is_visible('iframe[src*="google.com/recaptcha"]'):
@@ -239,7 +285,7 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                         await page.click('button:has-text("Next"):not([disabled])')
                         await page.wait_for_timeout(3000)
                     else:
-                        logger.warning("CAPTCHA solving failed, refreshing page")
+                        logger.warning("CAPTCHA solving failed, refreshing")
                         await page.reload(wait_until="networkidle")
                         captcha_attempts += 1
                         continue
@@ -256,35 +302,39 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             await code_input.fill(code)
             await page.click('button:has-text("Next"):not([disabled])')
 
+            # Skip recovery / agree
             try:
                 await page.wait_for_selector('button:has-text("I agree")', timeout=5000)
                 await page.click('button:has-text("I agree"):not([disabled])')
                 await page.wait_for_timeout(2000)
-            except:
+            except Exception:
                 pass
             try:
                 await page.click('button:has-text("Next"):not([disabled])', timeout=5000)
                 await page.wait_for_timeout(2000)
-            except:
+            except Exception:
                 pass
 
             await page.wait_for_timeout(5000)
             await browser.close()
-            logger.info("Browser closed successfully")
+            logger.info("Browser closed")
 
+        # Finish activation
         async with httpx.AsyncClient() as client:
-            await client.get(f"{SIM_API_BASE}/finish/{activation_id}",
-                             headers={"Authorization": f"Bearer {SMS_API_KEY}"})
+            await client.get(
+                f"{SIM_API_BASE}/finish/{activation_id}",
+                headers={"Authorization": f"Bearer {SMS_API_KEY}"}
+            )
             logger.info("Activation finished")
 
         return f"{desired_username}@gmail.com:{password}"
 
     except Exception as e:
-        logger.exception("Exception during Gmail creation")
+        logger.exception("Gmail creation error")
         try:
             if 'page' in locals():
                 await page.screenshot(path="error_screenshot.png")
-        except:
+        except Exception:
             pass
         await cancel_activation(activation_id)
         raise e
@@ -500,7 +550,7 @@ async def create_and_notify(bot, chat_id, message_id, user_id: int, email: str, 
         DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?",
                    (email, user_id))
         DB.commit()
-        error_msg = str(e)[:200]
+        error_msg = str(e)[:150]
         await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
                                     text=f"❌ Creation failed: {error_msg}. Refunded ₹10.")
 
