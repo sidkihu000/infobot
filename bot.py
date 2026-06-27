@@ -24,7 +24,7 @@ from telegram.ext import (
 load_dotenv()
 BOT_TOKEN = "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
-SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9...")
+SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE4MTQwODY4MzQsImlhdCI6MTc4MjU1MDgzNCwicmF5IjoiMjZjNjk2ZDMwMzNlOWVjMTFhNGRjYzkyODRhY2FiOWMiLCJzdWIiOjQyNjEwOTF9.c8Mej-NVTX_07Coiog4zUf6WRccQ3jlLMe5eB0yH5iTUbTUXpVwQwr6XYQxHc3k6Ecv6X14AmCcMxgL50ECUQ8XnhWXh2Fit0dyQ2axBjcpw3y9VC6VreKTdvA3uDBKOiHDQfZ6gBjMrHUjL3VGJZrtNLlFl--a6fm1TjOGAcvIEkQdtLCik1xEEUmZiH5ZcNEJvfZPoKCzTNtblFujbxBEu8V0aZ4KhS5wQ0LRPTHu7LYWPYY09eYgu-9hcOn_kuVLAc-4jMhcXi9mKyW1SGlHOw9AE01zrM52R4Rom9RRvMhJI97ZGWrpNyx2SG53BRZ-ccIKkbDeaTcwuNNzNeg")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6LczKzgtAAAAAHjfrXwbQghhKiCOpYfmNhNMi9Nf")
 PROXY_URL = os.getenv("PROXY_URL", "")
 
@@ -119,6 +119,7 @@ async def solve_captcha(page) -> str:
         if (elems.length > 0) return elems[0].getAttribute('data-sitekey');
         return null;
     }''')
+    
     if not sitekey:
         logger.info("No reCAPTCHA sitekey found")
         return None
@@ -327,16 +328,22 @@ async def loading_animation(bot, chat_id, message_id, stop_event: asyncio.Event)
     except Exception as e:
         logger.error(f"Animation error: {e}")
 
-# ---------- Bot Handlers (unchanged, but with enhanced logging) ----------
+# ---------- Bot Handlers ----------
 def get_main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📧 Email Create", callback_data="email_create")],
         [InlineKeyboardButton("💰 Wallet", callback_data="wallet")],
-        [InlineKeyboardButton("📞 Admin Contact", url="tg://user?id=Xricx0")],
-        [InlineKeyboardButton("🔐 Login", callback_data="login")],
+        [InlineKeyboardButton("📞 Admin Contact", url="tg://user?id=Xricx0")]
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    
+    # Auto-login system
+    DB.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)",
+               (user.id, user.username, user.first_name))
+    DB.commit()
+
     await update.message.reply_text("Welcome to Gmail Creator Bot!\nUse the buttons below:",
                                     reply_markup=get_main_menu())
 
@@ -346,17 +353,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     data = query.data
     user_id = query.from_user.id
 
-    if data == "login":
-        DB.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)",
-                   (user_id, query.from_user.username, query.from_user.first_name))
-        DB.commit()
-        await query.edit_message_text("✅ Logged in successfully! Use the menu.",
-                                      reply_markup=get_main_menu())
-
-    elif data == "wallet":
+    if data == "wallet":
         user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            await query.answer("Please login first.", show_alert=True)
+            await query.answer("Please send /start to register your account.", show_alert=True)
             return
         keyboard = [
             [InlineKeyboardButton("📥 Deposit", callback_data="deposit")],
@@ -368,7 +368,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif data == "deposit":
         user = DB.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            await query.answer("Please login first.", show_alert=True)
+            await query.answer("Please send /start to register your account.", show_alert=True)
             return
         await query.edit_message_text("Send the amount you want to deposit (numeric, e.g., 100):")
         return DEPOSIT_AMOUNT
@@ -376,7 +376,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif data == "email_create":
         user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            await query.answer("Please login first.", show_alert=True)
+            await query.answer("Please send /start to register your account.", show_alert=True)
             return
         if user["balance"] < 10:
             await query.answer("Insufficient balance. Minimum ₹10 required.", show_alert=True)
@@ -547,7 +547,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(deposit_conv)
     application.add_handler(email_conv)
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(login|wallet|main_menu|appdep_|rejdep_).*"))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(wallet|main_menu|appdep_|rejdep_).*"))
 
     application.run_polling()
 
