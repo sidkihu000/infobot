@@ -24,7 +24,7 @@ from telegram.ext import (
 load_dotenv()
 BOT_TOKEN = "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
-SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE4MTQwODY4MzQsImlhdCI6MTc4MjU1MDgzNCwicmF5IjoiMjZjNjk2ZDMwMzNlOWVjMTFhNGRjYzkyODRhY2FiOWMiLCJzdWIiOjQyNjEwOTF9.c8Mej-NVTX_07Coiog4zUf6WRccQ3jlLMe5eB0yH5iTUbTUXpVwQwr6XYQxHc3k6Ecv6X14AmCcMxgL50ECUQ8XnhWXh2Fit0dyQ2axBjcpw3y9VC6VreKTdvA3uDBKOiHDQfZ6gBjMrHUjL3VGJZrtNLlFl--a6fm1TjOGAcvIEkQdtLCik1xEEUmZiH5ZcNEJvfZPoKCzTNtblFujbxBEu8V0aZ4KhS5wQ0LRPTHu7LYWPYY09eYgu-9hcOn_kuVLAc-4jMhcXi9mKyW1SGlHOw9AE01zrM52R4Rom9RRvMhJI97ZGWrpNyx2SG53BRZ-ccIKkbDeaTcwuNNzNeg")
+SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9...")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6LczKzgtAAAAAHjfrXwbQghhKiCOpYfmNhNMi9Nf")
 PROXY_URL = os.getenv("PROXY_URL", "")
 
@@ -99,7 +99,7 @@ async def cancel_activation(activation_id: str):
         await client.get(f"{SIM_API_BASE}/cancel/{activation_id}",
                          headers={"Authorization": f"Bearer {SMS_API_KEY}"})
 
-# ---------- CAPTCHA Solver (2Captcha) with enhanced injection ----------
+# ---------- CAPTCHA Solver (2Captcha) ----------
 async def solve_captcha(page) -> str:
     if not CAPTCHA_API_KEY:
         logger.warning("CAPTCHA_API_KEY not set – cannot solve captcha")
@@ -119,13 +119,11 @@ async def solve_captcha(page) -> str:
         if (elems.length > 0) return elems[0].getAttribute('data-sitekey');
         return null;
     }''')
-    
     if not sitekey:
         logger.info("No reCAPTCHA sitekey found")
         return None
 
     async with httpx.AsyncClient() as client:
-        # Create 2Captcha task
         resp = await client.get("https://2captcha.com/in.php", params={
             "key": CAPTCHA_API_KEY,
             "method": "userrecaptcha",
@@ -139,7 +137,6 @@ async def solve_captcha(page) -> str:
             return None
         task_id = result["request"]
 
-        # Poll for solution
         for _ in range(20):
             await asyncio.sleep(5)
             resp = await client.get("https://2captcha.com/res.php", params={
@@ -151,7 +148,6 @@ async def solve_captcha(page) -> str:
             data = resp.json()
             if data.get("status") == 1:
                 token = data["request"]
-                # Inject token and trigger callback
                 await page.evaluate(f'''
                     const textarea = document.getElementById('g-recaptcha-response');
                     if (textarea) textarea.value = "{token}";
@@ -159,7 +155,6 @@ async def solve_captcha(page) -> str:
                     if (callback && typeof window[callback] === 'function') {{
                         window[callback]("{token}");
                     }} else {{
-                        // Try to submit the form
                         const form = document.querySelector('form');
                         if (form) form.requestSubmit();
                     }}
@@ -171,7 +166,7 @@ async def solve_captcha(page) -> str:
                 return None
     return None
 
-# ---------- Gmail Creation Engine (fully enhanced) ----------
+# ---------- Gmail Creation Engine ----------
 async def create_gmail_account(desired_username: str, password: str) -> str:
     activation = await buy_activation()
     phone_number = activation["phone"]
@@ -202,7 +197,6 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             context = await browser.new_context(**context_options)
             page = await context.new_page()
 
-            # Stealth injection
             await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -216,14 +210,10 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                 );
             """)
 
-            # Human-like initial delay
             await asyncio.sleep(random.uniform(2, 4))
-
-            # Go to signup
             await page.goto("https://accounts.google.com/signup/v2/webcreateaccount?flowName=GlifWebSignIn&flowEntry=SignUp", wait_until="networkidle")
             logger.info("Signup page loaded")
 
-            # Fill in form with random pauses
             await page.fill('input[name="firstName"]', "John")
             await asyncio.sleep(random.uniform(0.5, 1.5))
             await page.fill('input[name="lastName"]', "Doe")
@@ -234,16 +224,12 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             await asyncio.sleep(random.uniform(0.5, 1.5))
             await page.fill('input[name="ConfirmPasswd"]', password)
             await asyncio.sleep(random.uniform(0.5, 1.5))
-
-            # Move mouse randomly
             await page.mouse.move(random.randint(100, 500), random.randint(100, 400))
 
-            # Click Next button (ensure it's enabled)
             await page.click('button:has-text("Next"):not([disabled])')
             logger.info("Clicked Next after form fill")
             await page.wait_for_timeout(4000)
 
-            # CAPTCHA handling (retry once)
             captcha_attempts = 0
             while captcha_attempts < 2:
                 if await page.is_visible('iframe[src*="google.com/recaptcha"]'):
@@ -259,20 +245,17 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                         continue
                 break
 
-            # Phone entry
             phone_input = await page.wait_for_selector('input[type="tel"]', timeout=30000)
             await phone_input.fill(phone_number)
             await page.click('button:has-text("Next"):not([disabled])')
             logger.info("Phone number submitted")
 
-            # Wait for SMS code
             code = await get_sms(activation_id)
             logger.info(f"Got SMS code: {code}")
             code_input = await page.wait_for_selector('input[type="tel"]', timeout=30000)
             await code_input.fill(code)
             await page.click('button:has-text("Next"):not([disabled])')
 
-            # Agree to terms / skip recovery
             try:
                 await page.wait_for_selector('button:has-text("I agree")', timeout=5000)
                 await page.click('button:has-text("I agree"):not([disabled])')
@@ -289,7 +272,6 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             await browser.close()
             logger.info("Browser closed successfully")
 
-        # Finalize activation
         async with httpx.AsyncClient() as client:
             await client.get(f"{SIM_API_BASE}/finish/{activation_id}",
                              headers={"Authorization": f"Bearer {SMS_API_KEY}"})
@@ -299,14 +281,11 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
 
     except Exception as e:
         logger.exception("Exception during Gmail creation")
-        # Try to save screenshot if page still exists
         try:
             if 'page' in locals():
                 await page.screenshot(path="error_screenshot.png")
-                logger.error("Error screenshot saved to error_screenshot.png")
         except:
             pass
-        # Cancel activation to avoid waste
         await cancel_activation(activation_id)
         raise e
 
@@ -333,17 +312,11 @@ def get_main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📧 Email Create", callback_data="email_create")],
         [InlineKeyboardButton("💰 Wallet", callback_data="wallet")],
-        [InlineKeyboardButton("📞 Admin Contact", url="tg://user?id=Xricx0")]
+        [InlineKeyboardButton("📞 Admin Contact", url="tg://user?id=Xricx0")],
+        [InlineKeyboardButton("🔐 Login", callback_data="login")],
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    
-    # Auto-login system
-    DB.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)",
-               (user.id, user.username, user.first_name))
-    DB.commit()
-
     await update.message.reply_text("Welcome to Gmail Creator Bot!\nUse the buttons below:",
                                     reply_markup=get_main_menu())
 
@@ -353,10 +326,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     data = query.data
     user_id = query.from_user.id
 
-    if data == "wallet":
+    if data == "login":
+        DB.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)",
+                   (user_id, query.from_user.username, query.from_user.first_name))
+        DB.commit()
+        await query.edit_message_text("✅ Logged in successfully! Use the menu.",
+                                      reply_markup=get_main_menu())
+
+    elif data == "wallet":
         user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            await query.answer("Please send /start to register your account.", show_alert=True)
+            await query.answer("Please login first.", show_alert=True)
             return
         keyboard = [
             [InlineKeyboardButton("📥 Deposit", callback_data="deposit")],
@@ -368,19 +348,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif data == "deposit":
         user = DB.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            await query.answer("Please send /start to register your account.", show_alert=True)
+            await query.answer("Please login first.", show_alert=True)
             return
         await query.edit_message_text("Send the amount you want to deposit (numeric, e.g., 100):")
         return DEPOSIT_AMOUNT
 
     elif data == "email_create":
-        user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not user:
-            await query.answer("Please send /start to register your account.", show_alert=True)
-            return
-        if user["balance"] < 10:
-            await query.answer("Insufficient balance. Minimum ₹10 required.", show_alert=True)
-            return
+        # Always start the conversation – checks happen later
         await query.edit_message_text("Enter desired email username (without @gmail.com):")
         return EMAIL_USERNAME
 
@@ -483,6 +457,16 @@ async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     desired = context.user_data["desired_email"]
     cost = 10.0
 
+    # Check login and balance here
+    user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
+    if not user:
+        await update.message.reply_text("❌ You are not logged in. Please login first.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+    if user["balance"] < cost:
+        await update.message.reply_text(f"❌ Insufficient balance. You need ₹{cost}. Please deposit.", reply_markup=get_main_menu())
+        return ConversationHandler.END
+
+    # Deduct and start creation
     DB.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (cost, user_id))
     DB.execute("INSERT INTO email_orders (user_id, desired_email, password, cost) VALUES (?,?,?,?)",
                (user_id, desired, password, cost))
@@ -512,12 +496,10 @@ async def create_and_notify(bot, chat_id, message_id, user_id: int, email: str, 
     except Exception as e:
         logger.error(f"Creation failed for {email}: {e}")
         stop_event.set()
-        # Refund
         DB.execute("UPDATE users SET balance = balance + 10 WHERE user_id=?", (user_id,))
         DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?",
                    (email, user_id))
         DB.commit()
-        # Send error message with first 200 chars of exception
         error_msg = str(e)[:200]
         await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
                                     text=f"❌ Creation failed: {error_msg}. Refunded ₹10.")
@@ -547,7 +529,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(deposit_conv)
     application.add_handler(email_conv)
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(wallet|main_menu|appdep_|rejdep_).*"))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(login|wallet|main_menu|appdep_|rejdep_).*"))
 
     application.run_polling()
 
