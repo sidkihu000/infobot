@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime
 from io import BytesIO
 
-import aiohttp
+import httpx
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
