@@ -26,11 +26,14 @@ BOT_TOKEN = "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
 SMS_API_KEY = os.getenv("SMS_API_KEY", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9...")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6LczKzgtAAAAAHjfrXwbQghhKiCOpYfmNhNMi9Nf")
-PROXY_URL = os.getenv("PROXY_URL", "")   # Set in Railway env or leave empty
+PROXY_URL = os.getenv("PROXY_URL", "")
 
-# States for conversations
-DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
-EMAIL_USERNAME, EMAIL_PASSWORD = range(2)
+# ---------- Logging ----------
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO   # Change to logging.DEBUG for more detail
+)
+logger = logging.getLogger(__name__)
 
 # ---------- Database ----------
 DB = sqlite3.connect("bot_data.db", check_same_thread=False)
@@ -67,8 +70,6 @@ CREATE TABLE IF NOT EXISTS email_orders (
 """)
 DB.commit()
 
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-
 # ---------- Number Panel (5sim) Helpers ----------
 SIM_API_BASE = "https://5sim.net/v1/user"
 
@@ -78,6 +79,7 @@ async def buy_activation() -> dict:
                                 headers={"Authorization": f"Bearer {SMS_API_KEY}"})
         data = resp.json()
         if "id" not in data:
+            logger.error(f"5sim buy response: {data}")
             raise Exception("No numbers available")
         return {"id": data["id"], "phone": data["phone"]}
 
@@ -97,70 +99,83 @@ async def cancel_activation(activation_id: str):
         await client.get(f"{SIM_API_BASE}/cancel/{activation_id}",
                          headers={"Authorization": f"Bearer {SMS_API_KEY}"})
 
-# ---------- CAPTCHA Solver (2Captcha) ----------
-async def solve_captcha(page, sitekey=None) -> str:
+# ---------- CAPTCHA Solver (2Captcha) with enhanced injection ----------
+async def solve_captcha(page) -> str:
     if not CAPTCHA_API_KEY:
-        logging.warning("CAPTCHA_API_KEY not set – cannot solve captcha")
+        logger.warning("CAPTCHA_API_KEY not set – cannot solve captcha")
         return None
 
     url = page.url
-    if not sitekey:
-        sitekey = await page.evaluate('''() => {
-            const iframes = document.querySelectorAll('iframe');
-            for (let f of iframes) {
-                const src = f.src;
-                if (src.includes('google.com/recaptcha')) {
-                    const match = src.match(/[?&]k=([^&]+)/);
-                    if (match) return match[1];
-                }
+    sitekey = await page.evaluate('''() => {
+        const iframes = document.querySelectorAll('iframe');
+        for (let f of iframes) {
+            const src = f.src;
+            if (src.includes('google.com/recaptcha')) {
+                const match = src.match(/[?&]k=([^&]+)/);
+                if (match) return match[1];
             }
-            const elems = document.querySelectorAll('[data-sitekey]');
-            if (elems.length > 0) return elems[0].getAttribute('data-sitekey');
-            return null;
-        }''')
+        }
+        const elems = document.querySelectorAll('[data-sitekey]');
+        if (elems.length > 0) return elems[0].getAttribute('data-sitekey');
+        return null;
+    }''')
     if not sitekey:
-        logging.info("No reCAPTCHA sitekey found – maybe no CAPTCHA?")
+        logger.info("No reCAPTCHA sitekey found")
         return None
 
     async with httpx.AsyncClient() as client:
-        create_params = {
+        # Create 2Captcha task
+        resp = await client.get("https://2captcha.com/in.php", params={
             "key": CAPTCHA_API_KEY,
             "method": "userrecaptcha",
             "googlekey": sitekey,
             "pageurl": url,
             "json": 1,
-        }
-        resp = await client.get("https://2captcha.com/in.php", params=create_params)
+        })
         result = resp.json()
         if result.get("status") != 1:
-            logging.error(f"2Captcha create error: {result}")
+            logger.error(f"2Captcha create error: {result}")
             return None
         task_id = result["request"]
 
+        # Poll for solution
         for _ in range(20):
             await asyncio.sleep(5)
-            poll_resp = await client.get(
-                "https://2captcha.com/res.php",
-                params={
-                    "key": CAPTCHA_API_KEY,
-                    "action": "get",
-                    "id": task_id,
-                    "json": 1,
-                },
-            )
-            data = poll_resp.json()
+            resp = await client.get("https://2captcha.com/res.php", params={
+                "key": CAPTCHA_API_KEY,
+                "action": "get",
+                "id": task_id,
+                "json": 1,
+            })
+            data = resp.json()
             if data.get("status") == 1:
-                return data["request"]
+                token = data["request"]
+                # Inject token and trigger callback
+                await page.evaluate(f'''
+                    const textarea = document.getElementById('g-recaptcha-response');
+                    if (textarea) textarea.value = "{token}";
+                    const callback = document.getElementById('g-recaptcha-response').getAttribute('data-callback');
+                    if (callback && typeof window[callback] === 'function') {{
+                        window[callback]("{token}");
+                    }} else {{
+                        // Try to submit the form
+                        const form = document.querySelector('form');
+                        if (form) form.requestSubmit();
+                    }}
+                ''')
+                logger.info("CAPTCHA solved and token injected")
+                return token
             if data.get("request") == "ERROR_CAPTCHA_UNSOLVABLE":
-                logging.error("Captcha unsolvable")
+                logger.error("Captcha unsolvable")
                 return None
     return None
 
-# ---------- Gmail Creation Engine (Enhanced) ----------
+# ---------- Gmail Creation Engine (fully enhanced) ----------
 async def create_gmail_account(desired_username: str, password: str) -> str:
     activation = await buy_activation()
     phone_number = activation["phone"]
     activation_id = activation["id"]
+    logger.info(f"Got phone: {phone_number} (ID: {activation_id})")
 
     try:
         async with async_playwright() as p:
@@ -168,6 +183,12 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
                 "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
             ]
             browser = await p.chromium.launch(headless=True, args=launch_args)
 
@@ -180,7 +201,7 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
             context = await browser.new_context(**context_options)
             page = await context.new_page()
 
-            # Stealth patches
+            # Stealth injection
             await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -194,66 +215,97 @@ async def create_gmail_account(desired_username: str, password: str) -> str:
                 );
             """)
 
-            await asyncio.sleep(random.uniform(1, 3))
+            # Human-like initial delay
+            await asyncio.sleep(random.uniform(2, 4))
 
-            await page.goto("https://accounts.google.com/signup/v2/webcreateaccount?flowName=GlifWebSignIn&flowEntry=SignUp")
-            await page.wait_for_load_state("networkidle")
+            # Go to signup
+            await page.goto("https://accounts.google.com/signup/v2/webcreateaccount?flowName=GlifWebSignIn&flowEntry=SignUp", wait_until="networkidle")
+            logger.info("Signup page loaded")
 
+            # Fill in form with random pauses
             await page.fill('input[name="firstName"]', "John")
+            await asyncio.sleep(random.uniform(0.5, 1.5))
             await page.fill('input[name="lastName"]', "Doe")
+            await asyncio.sleep(random.uniform(0.5, 1.5))
             await page.fill('input[name="Username"]', desired_username)
+            await asyncio.sleep(random.uniform(0.5, 1.5))
             await page.fill('input[name="Passwd"]', password)
+            await asyncio.sleep(random.uniform(0.5, 1.5))
             await page.fill('input[name="ConfirmPasswd"]', password)
+            await asyncio.sleep(random.uniform(0.5, 1.5))
 
-            await page.click('button:has-text("Next")')
-            await page.wait_for_timeout(3000)
+            # Move mouse randomly
+            await page.mouse.move(random.randint(100, 500), random.randint(100, 400))
 
-            # CAPTCHA handling
-            for attempt in range(2):
+            # Click Next button (ensure it's enabled)
+            await page.click('button:has-text("Next"):not([disabled])')
+            logger.info("Clicked Next after form fill")
+            await page.wait_for_timeout(4000)
+
+            # CAPTCHA handling (retry once)
+            captcha_attempts = 0
+            while captcha_attempts < 2:
                 if await page.is_visible('iframe[src*="google.com/recaptcha"]'):
-                    logging.info("CAPTCHA detected – solving...")
+                    logger.info("CAPTCHA detected, solving...")
                     token = await solve_captcha(page)
                     if token:
-                        await page.evaluate(f'''() => {{
-                            const textarea = document.getElementById('g-recaptcha-response');
-                            if (textarea) textarea.innerHTML = "{token}";
-                            const event = new Event('change', {{ bubbles: true }});
-                            if (textarea) textarea.dispatchEvent(event);
-                        }}''')
-                        await page.click('button:has-text("Next")')
-                        await page.wait_for_timeout(2000)
+                        await page.click('button:has-text("Next"):not([disabled])')
+                        await page.wait_for_timeout(3000)
                     else:
-                        logging.warning("CAPTCHA solving failed, retrying...")
-                        await page.reload()
-                        await page.wait_for_load_state("networkidle")
+                        logger.warning("CAPTCHA solving failed, refreshing page")
+                        await page.reload(wait_until="networkidle")
+                        captcha_attempts += 1
                         continue
                 break
 
-            phone_input = await page.wait_for_selector('input[type="tel"]', timeout=15000)
+            # Phone entry
+            phone_input = await page.wait_for_selector('input[type="tel"]', timeout=30000)
             await phone_input.fill(phone_number)
-            await page.click('button:has-text("Next")')
+            await page.click('button:has-text("Next"):not([disabled])')
+            logger.info("Phone number submitted")
 
+            # Wait for SMS code
             code = await get_sms(activation_id)
-            code_input = await page.wait_for_selector('input[type="tel"]', timeout=15000)
+            logger.info(f"Got SMS code: {code}")
+            code_input = await page.wait_for_selector('input[type="tel"]', timeout=30000)
             await code_input.fill(code)
-            await page.click('button:has-text("Next")')
+            await page.click('button:has-text("Next"):not([disabled])')
 
+            # Agree to terms / skip recovery
             try:
-                await page.click('button:has-text("I agree")', timeout=5000)
-                await page.click('button:has-text("Next")', timeout=5000)
+                await page.wait_for_selector('button:has-text("I agree")', timeout=5000)
+                await page.click('button:has-text("I agree"):not([disabled])')
+                await page.wait_for_timeout(2000)
+            except:
+                pass
+            try:
+                await page.click('button:has-text("Next"):not([disabled])', timeout=5000)
+                await page.wait_for_timeout(2000)
             except:
                 pass
 
             await page.wait_for_timeout(5000)
             await browser.close()
+            logger.info("Browser closed successfully")
 
+        # Finalize activation
         async with httpx.AsyncClient() as client:
             await client.get(f"{SIM_API_BASE}/finish/{activation_id}",
                              headers={"Authorization": f"Bearer {SMS_API_KEY}"})
+            logger.info("Activation finished")
 
         return f"{desired_username}@gmail.com:{password}"
 
     except Exception as e:
+        logger.exception("Exception during Gmail creation")
+        # Try to save screenshot if page still exists
+        try:
+            if 'page' in locals():
+                await page.screenshot(path="error_screenshot.png")
+                logger.error("Error screenshot saved to error_screenshot.png")
+        except:
+            pass
+        # Cancel activation to avoid waste
         await cancel_activation(activation_id)
         raise e
 
@@ -273,9 +325,9 @@ async def loading_animation(bot, chat_id, message_id, stop_event: asyncio.Event)
                 await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=frame)
                 await asyncio.sleep(1)
     except Exception as e:
-        logging.error(f"Animation error: {e}")
+        logger.error(f"Animation error: {e}")
 
-# ---------- Bot Handlers ----------
+# ---------- Bot Handlers (unchanged, but with enhanced logging) ----------
 def get_main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📧 Email Create", callback_data="email_create")],
@@ -364,6 +416,8 @@ async def handle_admin_deposits(query, context, data):
         await context.bot.send_message(dep["user_id"], "❌ Your deposit was rejected. Contact admin.")
 
 # ---------- Deposit Conversation ----------
+DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
+
 async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         amount = float(update.message.text)
@@ -408,6 +462,8 @@ async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 # ---------- Email Creation Conversation ----------
+EMAIL_USERNAME, EMAIL_PASSWORD = range(2)
+
 async def email_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     username = update.message.text.strip()
     if not re.match(r"^[a-zA-Z0-9._]{6,30}$", username):
@@ -454,14 +510,17 @@ async def create_and_notify(bot, chat_id, message_id, user_id: int, email: str, 
                                     text=f"✅ Account created:\n`{credentials}`",
                                     parse_mode="Markdown")
     except Exception as e:
-        logging.error(f"Creation failed: {e}")
+        logger.error(f"Creation failed for {email}: {e}")
         stop_event.set()
+        # Refund
         DB.execute("UPDATE users SET balance = balance + 10 WHERE user_id=?", (user_id,))
         DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?",
                    (email, user_id))
         DB.commit()
+        # Send error message with first 200 chars of exception
+        error_msg = str(e)[:200]
         await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
-                                    text=f"❌ Creation failed: {str(e)[:100]}. Refunded ₹10.")
+                                    text=f"❌ Creation failed: {error_msg}. Refunded ₹10.")
 
 # ---------- Main ----------
 def main():
