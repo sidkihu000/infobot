@@ -92,7 +92,8 @@ def parse_proxy_url(url: str) -> dict | None:
 
 # ---------- Safe JSON helper ----------
 async def safe_json_response(response) -> dict:
-    text = await response.text()
+    # FIXED: response.text is a property in httpx, not an awaitable method
+    text = response.text
     if not text.strip():
         logger.error(f"Empty response from {response.url}")
         raise Exception("API returned empty response")
