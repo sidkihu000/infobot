@@ -1,4 +1,4 @@
-python-telegram-bot>=20.0
-httpx
-python-dotenv
-playwright
+python-telegram-bot[job-queue]==20.7
+playwright==1.41.0
+httpx==0.25.2
+python-dotenv==1.0.0
