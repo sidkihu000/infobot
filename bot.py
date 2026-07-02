@@ -3,7 +3,7 @@ from urllib.parse import urlparse
 import httpx
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ConversationHandler, filters, ContextTypes
@@ -12,8 +12,8 @@ from telegram.ext import (
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
-SMSPOOL_API_KEY = os.getenv("SMSPOOL_API_KEY", "")
-CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "")
+SIMS_API_KEY = os.getenv("SIMS_API_KEY", "03b8ccc51ef4cdc16246fdb3c4668b21")
+CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6LcBR0EtAAAAAHihWHAE4fPcaFHLKHLWDAhIlciQ")
 PROXY_URL = os.getenv("PROXY_URL", "")
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -59,43 +59,43 @@ def parse_proxy_url(url: str) -> dict | None:
     except:
         return None
 
-# ---------- SMSPool Automated ----------
-async def rent_smspool_number() -> dict:
-    """Rent a US number for Google. Returns {order_id, number}"""
-    params = {
-        "key": SMSPOOL_API_KEY,
-        "country": "United States",
-        "service": "Google",
-        "pool": "1"
-    }
-    async with httpx.AsyncClient(timeout=30) as cl:
-        r = await cl.post("https://api.smspool.net/purchase/1", data=params)
-        data = r.json()
-        if data.get("success") != 1:
-            raise Exception(f"SMSPool rent failed: {data.get('message','')}")
-        return {"order_id": data["order_id"], "number": data["number"].replace(" ", "")}
+# ---------- 5sim API (Your OTP Provider) ----------
+SIM_API_BASE = "https://5sim.net/v1/user"
 
-async def get_smspool_sms(order_id: str) -> str:
-    """Poll for SMS code up to 10 times (30s interval)"""
+async def buy_activation() -> dict:
+    """Buy a Google activation number. Returns {id, phone}."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{SIM_API_BASE}/buy/activation/google/any/any",
+            headers={"Authorization": f"Bearer {SIMS_API_KEY}"}
+        )
+        data = resp.json()
+        if "id" not in data:
+            raise Exception(f"5sim buy failed: {data}")
+        return {"id": data["id"], "phone": data["phone"]}
+
+async def get_sms(activation_id: str) -> str:
+    """Poll 5sim for SMS code up to 10 times (30s interval)."""
     for _ in range(10):
         await asyncio.sleep(30)
-        async with httpx.AsyncClient(timeout=30) as cl:
-            r = await cl.get("https://api.smspool.net/sms/1", params={
-                "key": SMSPOOL_API_KEY, "orderid": order_id, "smstype": "1"
-            })
-            data = r.json()
-            if data.get("status") == 1 and data.get("sms"):
-                sms = data["sms"]
-                m = re.search(r'(\d{4,8})', sms)
-                return m.group(1) if m else sms
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{SIM_API_BASE}/check/{activation_id}",
+                headers={"Authorization": f"Bearer {SIMS_API_KEY}"}
+            )
+            data = resp.json()
+            if data.get("status") == "RECEIVED" and data.get("sms"):
+                return data["sms"][0]["code"]
     raise TimeoutError("SMS not received in 5 minutes")
 
-async def cancel_smspool_number(order_id: str):
+async def cancel_activation(activation_id: str):
+    """Cancel the activation to avoid wasting balance."""
     try:
-        async with httpx.AsyncClient(timeout=30) as cl:
-            await cl.get("https://api.smspool.net/cancel/1", params={
-                "key": SMSPOOL_API_KEY, "orderid": order_id
-            })
+        async with httpx.AsyncClient(timeout=30) as client:
+            await client.get(
+                f"{SIM_API_BASE}/cancel/{activation_id}",
+                headers={"Authorization": f"Bearer {SIMS_API_KEY}"}
+            )
     except Exception as e:
         logger.warning(f"Cancel failed (non-critical): {e}")
 
@@ -141,11 +141,11 @@ async def solve_captcha(page) -> str | None:
 
 # ---------- Gmail Creator (fully automated) ----------
 async def create_gmail_auto(username: str, password: str) -> str:
-    """Rent number, solve captcha, get SMS, create account. Returns email:password."""
-    rental = await rent_smspool_number()
-    phone = rental["number"]
-    order_id = rental["order_id"]
-    logger.info(f"Rented {phone} (order {order_id})")
+    """Rent number via 5sim, solve captcha, get SMS, create account. Returns email:password."""
+    activation = await buy_activation()
+    phone = activation["phone"]
+    activation_id = activation["id"]
+    logger.info(f"Rented {phone} (activation {activation_id})")
 
     try:
         async with async_playwright() as p:
@@ -206,7 +206,7 @@ async def create_gmail_auto(username: str, password: str) -> str:
 
             # wait for SMS
             logger.info("Waiting for SMS...")
-            code = await get_smspool_sms(order_id)
+            code = await get_sms(activation_id)
             logger.info(f"Got code: {code}")
             await page.wait_for_selector('input[type="tel"]', timeout=30000)
             await page.fill('input[type="tel"]', code)
@@ -230,7 +230,7 @@ async def create_gmail_auto(username: str, password: str) -> str:
         return f"{username}@gmail.com:{password}"
 
     except Exception as e:
-        await cancel_smspool_number(order_id)
+        await cancel_activation(activation_id)
         raise e
 
 # ---------- Bot UI (unchanged) ----------
