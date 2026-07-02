@@ -21,8 +21,3 @@ aptPkgs = [
     "libatspi2.0-0"
 ]
 
-[phases.build]
-cmds = [
-    "pip install -r requirements.txt",
-    "playwright install chromium"
-]
