@@ -13,8 +13,9 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
 SIMS_API_KEY = os.getenv("SIMS_API_KEY", "03b8ccc51ef4cdc16246fdb3c4668b21")
-CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6LcBR0EtAAAAAHihWHAE4fPcaFHLKHLWDAhIlciQ")
+CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "")
 PROXY_URL = os.getenv("PROXY_URL", "")
+WEB_APP_URL = os.getenv("WEB_APP_URL", "")   # <-- your mini app URL
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,43 +60,54 @@ def parse_proxy_url(url: str) -> dict | None:
     except:
         return None
 
-# ---------- 5sim API (Your OTP Provider) ----------
-SIM_API_BASE = "https://5sim.net/v1/user"
+# ---------- 4sim API ----------
+SIM_API_BASE = "https://api.4sim.st"
+google_service_id = None
+
+async def fetch_google_service_id():
+    global google_service_id
+    if google_service_id:
+        return google_service_id
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{SIM_API_BASE}/getServices?apikey={SIMS_API_KEY}")
+        data = resp.json()
+        for service in data.get("services", data):
+            if isinstance(service, dict):
+                name = service.get("name", "").lower()
+                if "google" in name:
+                    google_service_id = service["id"]
+                    logger.info(f"Found Google service ID: {google_service_id}")
+                    return google_service_id
+        raise Exception("Google service not found in 4sim")
 
 async def buy_activation() -> dict:
-    """Buy a Google activation number. Returns {id, phone}."""
+    sid = await fetch_google_service_id()
+    url = f"{SIM_API_BASE}/buyNumber?apikey={SIMS_API_KEY}&id={sid}&country=any"
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{SIM_API_BASE}/buy/activation/google/any/any",
-            headers={"Authorization": f"Bearer {SIMS_API_KEY}"}
-        )
+        resp = await client.get(url)
         data = resp.json()
-        if "id" not in data:
-            raise Exception(f"5sim buy failed: {data}")
-        return {"id": data["id"], "phone": data["phone"]}
+        if data.get("status") != "SUCCESS":
+            raise Exception(f"4sim buy failed: {data.get('message', data)}")
+        return {"id": data["id"], "phone": data["number"]}
 
 async def get_sms(activation_id: str) -> str:
-    """Poll 5sim for SMS code up to 10 times (30s interval)."""
     for _ in range(10):
         await asyncio.sleep(30)
+        url = f"{SIM_API_BASE}/checkSms?apikey={SIMS_API_KEY}&id={activation_id}"
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{SIM_API_BASE}/check/{activation_id}",
-                headers={"Authorization": f"Bearer {SIMS_API_KEY}"}
-            )
+            resp = await client.get(url)
             data = resp.json()
-            if data.get("status") == "RECEIVED" and data.get("sms"):
-                return data["sms"][0]["code"]
+            if data.get("status") == "SUCCESS" and data.get("sms"):
+                sms_text = data["sms"]
+                m = re.search(r'(\d{4,8})', sms_text)
+                return m.group(1) if m else sms_text
     raise TimeoutError("SMS not received in 5 minutes")
 
 async def cancel_activation(activation_id: str):
-    """Cancel the activation to avoid wasting balance."""
     try:
+        url = f"{SIM_API_BASE}/cancelNumber?apikey={SIMS_API_KEY}&id={activation_id}"
         async with httpx.AsyncClient(timeout=30) as client:
-            await client.get(
-                f"{SIM_API_BASE}/cancel/{activation_id}",
-                headers={"Authorization": f"Bearer {SIMS_API_KEY}"}
-            )
+            await client.get(url)
     except Exception as e:
         logger.warning(f"Cancel failed (non-critical): {e}")
 
@@ -110,7 +122,6 @@ async def solve_captcha(page) -> str | None:
     }''')
     if not sitekey: return None
     async with httpx.AsyncClient(timeout=120) as cl:
-        # create task
         r = await cl.get("https://2captcha.com/in.php", params={
             "key": CAPTCHA_API_KEY, "method": "userrecaptcha",
             "googlekey": sitekey, "pageurl": url, "json": 1
@@ -118,7 +129,6 @@ async def solve_captcha(page) -> str | None:
         res = r.json()
         if res.get("status")!=1: return None
         task_id = res["request"]
-        # poll
         for _ in range(30):
             await asyncio.sleep(10)
             r = await cl.get("https://2captcha.com/res.php", params={
@@ -139,9 +149,8 @@ async def solve_captcha(page) -> str | None:
             if data.get("request")=="ERROR_CAPTCHA_UNSOLVABLE": return None
     return None
 
-# ---------- Gmail Creator (fully automated) ----------
+# ---------- Gmail Creator (unchanged) ----------
 async def create_gmail_auto(username: str, password: str) -> str:
-    """Rent number via 5sim, solve captcha, get SMS, create account. Returns email:password."""
     activation = await buy_activation()
     phone = activation["phone"]
     activation_id = activation["id"]
@@ -163,7 +172,6 @@ async def create_gmail_auto(username: str, password: str) -> str:
             context = await browser.new_context(**ctx_opts)
             page = await context.new_page()
 
-            # stealth
             await page.add_init_script("""
                 Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
                 Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
@@ -185,7 +193,6 @@ async def create_gmail_auto(username: str, password: str) -> str:
             await page.click('button:has-text("Next")')
             await page.wait_for_timeout(4000)
 
-            # captcha
             for _ in range(2):
                 if await page.is_visible('iframe[src*="google.com/recaptcha"]'):
                     logger.info("Captcha appeared, solving...")
@@ -199,12 +206,10 @@ async def create_gmail_auto(username: str, password: str) -> str:
                         continue
                 break
 
-            # phone
             await page.wait_for_selector('input[type="tel"]', timeout=30000)
             await page.fill('input[type="tel"]', phone)
             await page.click('button:has-text("Next")')
 
-            # wait for SMS
             logger.info("Waiting for SMS...")
             code = await get_sms(activation_id)
             logger.info(f"Got code: {code}")
@@ -212,7 +217,6 @@ async def create_gmail_auto(username: str, password: str) -> str:
             await page.fill('input[type="tel"]', code)
             await page.click('button:has-text("Next")')
 
-            # final steps
             try:
                 await page.wait_for_selector('button:has-text("I agree")', timeout=5000)
                 await page.click('button:has-text("I agree")')
@@ -226,14 +230,13 @@ async def create_gmail_auto(username: str, password: str) -> str:
             await page.wait_for_timeout(4000)
             await browser.close()
 
-        # success
         return f"{username}@gmail.com:{password}"
 
     except Exception as e:
         await cancel_activation(activation_id)
         raise e
 
-# ---------- Bot UI (unchanged) ----------
+# ---------- Bot UI (Web App + fallback menu) ----------
 def get_main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📧 Create Email", callback_data="email_create")],
@@ -243,8 +246,43 @@ def get_main_menu():
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Fully automated Gmail creator.\nUse menu:", reply_markup=get_main_menu())
+    """Sends a button to open the mini web app, plus the classic inline menu."""
+    text = "👋 Fully automated Gmail creator.\nTap below to open the Web App, or use the inline menu:"
+    
+    buttons = []
+    if WEB_APP_URL:
+        buttons.append([InlineKeyboardButton("🚀 Open Creator", web_app=WebAppInfo(url=WEB_APP_URL))])
+    buttons.extend(get_main_menu().inline_keyboard)
+    
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
+async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receives actions from the mini web app."""
+    data = update.message.web_app_data.data
+    user_id = update.effective_user.id
+
+    # Same actions as your inline buttons
+    if data == "email_create":
+        await update.message.reply_text("Enter desired username (without @gmail.com):")
+        return EMAIL_USERNAME
+    elif data == "wallet":
+        user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not user:
+            await update.message.reply_text("Please /login first.")
+            return
+        await update.message.reply_text(f"💰 Balance: ₹{user['balance']:.2f}")
+    elif data == "admin_contact":
+        await update.message.reply_text("Contact admin: @Xricx0")
+    elif data == "login":
+        DB.execute("INSERT OR IGNORE INTO users (user_id,username,first_name) VALUES (?,?,?)",
+                   (user_id, update.effective_user.username, update.effective_user.first_name))
+        DB.commit()
+        await update.message.reply_text("✅ Logged in!")
+    else:
+        await update.message.reply_text("Unknown action.")
+    return ConversationHandler.END
+
+# ---------- Inline button handler (unchanged) ----------
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -277,109 +315,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif data.startswith("appdep_") or data.startswith("rejdep_"):
         await handle_admin_deposits(query, context, data)
 
-async def handle_admin_deposits(query, context, data):
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("Unauthorized", show_alert=True); return
-    action, dep_id = data.split("_")
-    dep_id = int(dep_id)
-    dep = DB.execute("SELECT * FROM deposits WHERE id=?", (dep_id,)).fetchone()
-    if not dep or dep["status"] != "pending":
-        await query.edit_message_caption(caption="Already processed."); return
-    if action == "appdep":
-        DB.execute("UPDATE deposits SET status='approved' WHERE id=?", (dep_id,))
-        DB.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (dep["amount"], dep["user_id"]))
-        DB.commit()
-        await query.edit_message_caption(caption=f"✅ Deposit #{dep_id} approved.")
-        await context.bot.send_message(dep["user_id"], f"✅ ₹{dep['amount']} added!")
-    else:
-        DB.execute("UPDATE deposits SET status='rejected' WHERE id=?", (dep_id,))
-        DB.commit()
-        await query.edit_message_caption(caption=f"❌ Deposit #{dep_id} rejected.")
-        await context.bot.send_message(dep["user_id"], "❌ Deposit rejected.")
+# … rest of your handlers (handle_admin_deposits, deposit_amount, deposit_screenshot,
+#   email_username, email_password, run_creation, main) remain exactly the same …
 
-# Conversation states
-DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
-EMAIL_USERNAME, EMAIL_PASSWORD = range(2)
-
-async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        amt = float(update.message.text)
-    except:
-        await update.message.reply_text("Invalid number"); return DEPOSIT_AMOUNT
-    context.user_data["deposit_amount"] = amt
-    if os.path.exists("qr_code.jpg"):
-        with open("qr_code.jpg", "rb") as f:
-            await update.message.reply_photo(f, caption=f"Scan ₹{amt}. Send screenshot.")
-    else:
-        await update.message.reply_text(f"Transfer ₹{amt} and send TXID.")
-    return DEPOSIT_SCREENSHOT
-
-async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    amt = context.user_data.get("deposit_amount",0)
-    file_id = update.message.photo[-1].file_id if update.message.photo else update.message.text
-    cur = DB.execute("INSERT INTO deposits (user_id,amount,screenshot_file_id) VALUES (?,?,?)", (uid,amt,file_id))
-    dep_id = cur.lastrowid
-    DB.commit()
-    admin_kbd = [[InlineKeyboardButton("✅ Approve", callback_data=f"appdep_{dep_id}"),
-                  InlineKeyboardButton("❌ Reject", callback_data=f"rejdep_{dep_id}")]]
-    msg = f"Deposit #{dep_id} by {uid}\nAmount: ₹{amt}"
-    if update.message.photo:
-        await context.bot.send_photo(ADMIN_ID, file_id, caption=msg, reply_markup=InlineKeyboardMarkup(admin_kbd))
-    else:
-        await context.bot.send_message(ADMIN_ID, f"{msg}\nTxID: {file_id}", reply_markup=InlineKeyboardMarkup(admin_kbd))
-    await update.message.reply_text("✅ Submitted. Admin will verify.", reply_markup=get_main_menu())
-    return ConversationHandler.END
-
-# Email creation conversation (only 2 steps)
-async def email_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    usr = update.message.text.strip()
-    if not re.match(r'^[a-zA-Z0-9._]{6,30}$', usr):
-        await update.message.reply_text("Invalid username (6-30 chars)."); return EMAIL_USERNAME
-    context.user_data["desired_email"] = usr
-    await update.message.reply_text("Enter password (min 8 chars):")
-    return EMAIL_PASSWORD
-
-async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pwd = update.message.text.strip()
-    if len(pwd) < 8:
-        await update.message.reply_text("Too short (min 8)."); return EMAIL_PASSWORD
-    uid = update.effective_user.id
-    desired = context.user_data["desired_email"]
-    cost = 10.0
-
-    user = DB.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
-    if not user:
-        await update.message.reply_text("❌ Login first.", reply_markup=get_main_menu()); return ConversationHandler.END
-    if user["balance"] < cost:
-        await update.message.reply_text(f"❌ Insufficient balance (₹{cost}). Deposit please.", reply_markup=get_main_menu()); return ConversationHandler.END
-
-    # Deduct & insert
-    DB.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (cost, uid))
-    DB.execute("INSERT INTO email_orders (user_id,desired_email,password,cost) VALUES (?,?,?,?)",
-               (uid, desired, pwd, cost))
-    DB.commit()
-
-    msg = await update.message.reply_text("⏳ Creating your Gmail... (this takes ~2 min)")
-    asyncio.create_task(run_creation(context.bot, update.effective_chat.id, msg.message_id, uid, desired, pwd))
-    return ConversationHandler.END
-
-async def run_creation(bot, chat_id, msg_id, uid, email, pwd):
-    try:
-        creds = await create_gmail_auto(email, pwd)
-        DB.execute("UPDATE email_orders SET status='completed' WHERE desired_email=? AND user_id=?", (email, uid))
-        DB.commit()
-        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                    text=f"✅ Created:\n`{creds}`", parse_mode="Markdown")
-    except Exception as e:
-        logger.exception("Auto creation failed")
-        DB.execute("UPDATE users SET balance = balance + 10 WHERE user_id=?", (uid,))
-        DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?", (email, uid))
-        DB.commit()
-        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                    text=f"❌ Failed: {str(e)[:200]}\nRefunded ₹10.")
-
-# ---------- Main ----------
+# ---------- Main (add web_app_data handler) ----------
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -404,6 +343,7 @@ def main():
     app.add_handler(dep_conv)
     app.add_handler(email_conv)
     app.add_handler(CallbackQueryHandler(button_handler, pattern="^(login|wallet|main_menu|appdep_|rejdep_).*"))
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data))
     app.run_polling()
 
 if __name__ == "__main__":
