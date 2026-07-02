@@ -13,9 +13,9 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
 SIMS_API_KEY = os.getenv("SIMS_API_KEY", "03b8ccc51ef4cdc16246fdb3c4668b21")
-CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "")
-PROXY_URL = os.getenv("PROXY_URL", "")
-WEB_APP_URL = os.getenv("WEB_APP_URL", "")   # <-- your mini app URL
+CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6Lf6U0EtAAAAABLduy-p5ch0aDrvBcFacxnHRKIJ")
+PROXY_URL = os.getenv("PROXY_URL", "8ZdCh8tMpCpgwwPeDPJzddE2mEmpVAjBV1mVwTQ657En")
+WEB_APP_URL = os.getenv("WEB_APP_URL", "")
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ async def solve_captcha(page) -> str | None:
             if data.get("request")=="ERROR_CAPTCHA_UNSOLVABLE": return None
     return None
 
-# ---------- Gmail Creator (unchanged) ----------
+# ---------- Gmail Creator ----------
 async def create_gmail_auto(username: str, password: str) -> str:
     activation = await buy_activation()
     phone = activation["phone"]
@@ -236,7 +236,7 @@ async def create_gmail_auto(username: str, password: str) -> str:
         await cancel_activation(activation_id)
         raise e
 
-# ---------- Bot UI (Web App + fallback menu) ----------
+# ---------- Bot UI ----------
 def get_main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📧 Create Email", callback_data="email_create")],
@@ -246,22 +246,16 @@ def get_main_menu():
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a button to open the mini web app, plus the classic inline menu."""
     text = "👋 Fully automated Gmail creator.\nTap below to open the Web App, or use the inline menu:"
-    
     buttons = []
     if WEB_APP_URL:
         buttons.append([InlineKeyboardButton("🚀 Open Creator", web_app=WebAppInfo(url=WEB_APP_URL))])
     buttons.extend(get_main_menu().inline_keyboard)
-    
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receives actions from the mini web app."""
     data = update.message.web_app_data.data
     user_id = update.effective_user.id
-
-    # Same actions as your inline buttons
     if data == "email_create":
         await update.message.reply_text("Enter desired username (without @gmail.com):")
         return EMAIL_USERNAME
@@ -282,7 +276,6 @@ async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Unknown action.")
     return ConversationHandler.END
 
-# ---------- Inline button handler (unchanged) ----------
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -315,10 +308,110 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif data.startswith("appdep_") or data.startswith("rejdep_"):
         await handle_admin_deposits(query, context, data)
 
-# … rest of your handlers (handle_admin_deposits, deposit_amount, deposit_screenshot,
-#   email_username, email_password, run_creation, main) remain exactly the same …
+# ---------- Admin deposit handling ----------
+async def handle_admin_deposits(query, context, data):
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("Unauthorized", show_alert=True); return
+    action, dep_id = data.split("_")
+    dep_id = int(dep_id)
+    dep = DB.execute("SELECT * FROM deposits WHERE id=?", (dep_id,)).fetchone()
+    if not dep or dep["status"] != "pending":
+        await query.edit_message_caption(caption="Already processed."); return
+    if action == "appdep":
+        DB.execute("UPDATE deposits SET status='approved' WHERE id=?", (dep_id,))
+        DB.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (dep["amount"], dep["user_id"]))
+        DB.commit()
+        await query.edit_message_caption(caption=f"✅ Deposit #{dep_id} approved.")
+        await context.bot.send_message(dep["user_id"], f"✅ ₹{dep['amount']} added!")
+    else:
+        DB.execute("UPDATE deposits SET status='rejected' WHERE id=?", (dep_id,))
+        DB.commit()
+        await query.edit_message_caption(caption=f"❌ Deposit #{dep_id} rejected.")
+        await context.bot.send_message(dep["user_id"], "❌ Deposit rejected.")
 
-# ---------- Main (add web_app_data handler) ----------
+# ---------- Deposit Conversation ----------
+DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
+
+async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amt = float(update.message.text)
+    except:
+        await update.message.reply_text("Invalid number"); return DEPOSIT_AMOUNT
+    context.user_data["deposit_amount"] = amt
+    if os.path.exists("qr_code.jpg"):
+        with open("qr_code.jpg", "rb") as f:
+            await update.message.reply_photo(f, caption=f"Scan ₹{amt}. Send screenshot.")
+    else:
+        await update.message.reply_text(f"Transfer ₹{amt} and send TXID.")
+    return DEPOSIT_SCREENSHOT
+
+async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    amt = context.user_data.get("deposit_amount",0)
+    file_id = update.message.photo[-1].file_id if update.message.photo else update.message.text
+    cur = DB.execute("INSERT INTO deposits (user_id,amount,screenshot_file_id) VALUES (?,?,?)", (uid,amt,file_id))
+    dep_id = cur.lastrowid
+    DB.commit()
+    admin_kbd = [[InlineKeyboardButton("✅ Approve", callback_data=f"appdep_{dep_id}"),
+                  InlineKeyboardButton("❌ Reject", callback_data=f"rejdep_{dep_id}")]]
+    msg = f"Deposit #{dep_id} by {uid}\nAmount: ₹{amt}"
+    if update.message.photo:
+        await context.bot.send_photo(ADMIN_ID, file_id, caption=msg, reply_markup=InlineKeyboardMarkup(admin_kbd))
+    else:
+        await context.bot.send_message(ADMIN_ID, f"{msg}\nTxID: {file_id}", reply_markup=InlineKeyboardMarkup(admin_kbd))
+    await update.message.reply_text("✅ Submitted. Admin will verify.", reply_markup=get_main_menu())
+    return ConversationHandler.END
+
+# ---------- Email Creation Conversation ----------
+EMAIL_USERNAME, EMAIL_PASSWORD = range(2)
+
+async def email_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    usr = update.message.text.strip()
+    if not re.match(r'^[a-zA-Z0-9._]{6,30}$', usr):
+        await update.message.reply_text("Invalid username (6-30 chars)."); return EMAIL_USERNAME
+    context.user_data["desired_email"] = usr
+    await update.message.reply_text("Enter password (min 8 chars):")
+    return EMAIL_PASSWORD
+
+async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pwd = update.message.text.strip()
+    if len(pwd) < 8:
+        await update.message.reply_text("Too short (min 8)."); return EMAIL_PASSWORD
+    uid = update.effective_user.id
+    desired = context.user_data["desired_email"]
+    cost = 10.0
+
+    user = DB.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
+    if not user:
+        await update.message.reply_text("❌ Login first.", reply_markup=get_main_menu()); return ConversationHandler.END
+    if user["balance"] < cost:
+        await update.message.reply_text(f"❌ Insufficient balance (₹{cost}). Deposit please.", reply_markup=get_main_menu()); return ConversationHandler.END
+
+    DB.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (cost, uid))
+    DB.execute("INSERT INTO email_orders (user_id,desired_email,password,cost) VALUES (?,?,?,?)",
+               (uid, desired, pwd, cost))
+    DB.commit()
+
+    msg = await update.message.reply_text("⏳ Creating your Gmail... (this takes ~2 min)")
+    asyncio.create_task(run_creation(context.bot, update.effective_chat.id, msg.message_id, uid, desired, pwd))
+    return ConversationHandler.END
+
+async def run_creation(bot, chat_id, msg_id, uid, email, pwd):
+    try:
+        creds = await create_gmail_auto(email, pwd)
+        DB.execute("UPDATE email_orders SET status='completed' WHERE desired_email=? AND user_id=?", (email, uid))
+        DB.commit()
+        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
+                                    text=f"✅ Created:\n`{creds}`", parse_mode="Markdown")
+    except Exception as e:
+        logger.exception("Auto creation failed")
+        DB.execute("UPDATE users SET balance = balance + 10 WHERE user_id=?", (uid,))
+        DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?", (email, uid))
+        DB.commit()
+        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
+                                    text=f"❌ Failed: {str(e)[:200]}\nRefunded ₹10.")
+
+# ---------- Main ----------
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
