@@ -1,13 +1,7 @@
-FROM mcr.microsoft.com/playwright/python:v1.41.0-jammy
-
+FROM python:3.10-slim
 WORKDIR /app
-
-# Copy requirements and install Python packages
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy your bot code
-COPY . .
-
-# Start the bot
+RUN playwright install chromium && playwright install-deps
+COPY bot.py .
 CMD ["python", "bot.py"]
