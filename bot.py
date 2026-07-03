@@ -119,6 +119,9 @@ async def get_countries() -> dict:
 async def get_services(country: str) -> dict:
     result = await _otp_request({"action": "getServices", "country": country})
     if isinstance(result, dict):
+        # Some APIs return a nested structure with a "services" key
+        if "services" in result and isinstance(result["services"], dict):
+            return result["services"]
         return result
     raise Exception(f"获取服务列表失败: {result}")
 
@@ -128,19 +131,21 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
     if cache_key in _service_cache:
         return _service_cache[cache_key]
 
-    # Build list of countries to try
-    countries_to_try = []
-    if country == "any":
+    # Build list of countries to try: first hardcoded common ones, then dynamic from API
+    countries_to_try = ["us", "gb", "in", "ru", "ua", "pl", "de", "fr", "es", "it"]
+    if country != "any":
+        countries_to_try = [country]
+    else:
         try:
             countries_dict = await get_countries()
-            countries_to_try = list(countries_dict.keys())
-            logger.info(f"Fetched {len(countries_to_try)} countries from API")
+            dynamic_countries = list(countries_dict.keys())
+            # Append dynamic ones not already in the list
+            for c in dynamic_countries:
+                if c not in countries_to_try:
+                    countries_to_try.append(c)
+            logger.info(f"Total countries to try: {len(countries_to_try)}")
         except Exception as e:
             logger.warning(f"Could not fetch countries from API: {e}")
-            # Fallback to common countries
-            countries_to_try = ["us", "in", "gb", "ru", "ua", "pl", "de", "fr", "es", "it"]
-    else:
-        countries_to_try = [country]
 
     # Multiple service name variants to match
     service_variants = [service_name.lower(), "gmail", "googlemail"]
@@ -148,16 +153,20 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
     for country_code in countries_to_try:
         try:
             services = await get_services(country_code)
-            # services is a dict: id -> name
+            # services should be a dict: id -> name
             for sid, name in services.items():
+                if not isinstance(name, str):
+                    continue  # skip non-string values
                 name_lower = name.lower()
                 for variant in service_variants:
                     if variant in name_lower:
                         _service_cache[cache_key] = sid
-                        logger.info(f"✅ Found service '{name}' (ID: {sid}) in country {country_code} (variant: '{variant}')")
+                        logger.info(f"✅ Found service '{name}' (ID: {sid}) in country {country_code}")
                         return sid
         except Exception as e:
             logger.warning(f"Could not fetch services for {country_code}: {e}")
+            # Avoid hitting rate limits
+            await asyncio.sleep(1)
             continue
 
     # If we reach here, no service was found.
@@ -732,4 +741,3 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
