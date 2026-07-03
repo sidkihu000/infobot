@@ -117,12 +117,31 @@ async def get_countries() -> dict:
     raise Exception(f"获取国家列表失败: {result}")
 
 async def get_services(country: str) -> dict:
+    """
+    Fetch services for a country and return a dict {id: name}.
+    Handles both dict and list responses.
+    """
     result = await _otp_request({"action": "getServices", "country": country})
+    
     if isinstance(result, dict):
-        # Some APIs return a nested structure with a "services" key
+        # Some responses have a 'services' key
         if "services" in result and isinstance(result["services"], dict):
             return result["services"]
+        # Otherwise, assume result itself is the service dict
         return result
+    
+    elif isinstance(result, list):
+        # Convert list of {id, name} to dict
+        services = {}
+        for item in result:
+            if isinstance(item, dict):
+                sid = item.get("id")
+                name = item.get("name") or item.get("service")
+                if sid and name:
+                    services[str(sid)] = str(name)
+        if services:
+            return services
+    
     raise Exception(f"获取服务列表失败: {result}")
 
 # ---------- IMPROVED get_service_id ----------
@@ -131,7 +150,7 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
     if cache_key in _service_cache:
         return _service_cache[cache_key]
 
-    # Build list of countries to try: first hardcoded common ones, then dynamic from API
+    # Build list of countries to try: hardcoded common ones first, then dynamic
     countries_to_try = ["us", "gb", "in", "ru", "ua", "pl", "de", "fr", "es", "it"]
     if country != "any":
         countries_to_try = [country]
@@ -139,7 +158,6 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
         try:
             countries_dict = await get_countries()
             dynamic_countries = list(countries_dict.keys())
-            # Append dynamic ones not already in the list
             for c in dynamic_countries:
                 if c not in countries_to_try:
                     countries_to_try.append(c)
@@ -147,16 +165,25 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
         except Exception as e:
             logger.warning(f"Could not fetch countries from API: {e}")
 
-    # Multiple service name variants to match
     service_variants = [service_name.lower(), "gmail", "googlemail"]
+
+    # Debug: fetch and log the service list for US (first country)
+    if "us" in countries_to_try:
+        try:
+            us_services = await get_services("us")
+            logger.info(f"US services (sample): {dict(list(us_services.items())[:10])}")
+        except Exception as e:
+            logger.warning(f"Could not fetch US services for debugging: {e}")
 
     for country_code in countries_to_try:
         try:
             services = await get_services(country_code)
-            # services should be a dict: id -> name
             for sid, name in services.items():
+                if isinstance(name, dict):
+                    # Try to extract name from dict
+                    name = name.get("name") or name.get("service") or str(name)
                 if not isinstance(name, str):
-                    continue  # skip non-string values
+                    continue
                 name_lower = name.lower()
                 for variant in service_variants:
                     if variant in name_lower:
@@ -165,17 +192,8 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
                         return sid
         except Exception as e:
             logger.warning(f"Could not fetch services for {country_code}: {e}")
-            # Avoid hitting rate limits
-            await asyncio.sleep(1)
+            await asyncio.sleep(1)  # avoid rate limits
             continue
-
-    # If we reach here, no service was found.
-    # Log the services from a default country (e.g., US) to help debugging.
-    try:
-        services_us = await get_services("us")
-        logger.info(f"Available services in US: {services_us}")
-    except Exception as e:
-        logger.warning(f"Could not fetch US services for debugging: {e}")
 
     raise Exception(f"No country found that offers service: {service_name}")
 
@@ -741,3 +759,4 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
+    main()
