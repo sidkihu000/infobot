@@ -1,5 +1,6 @@
 import asyncio, logging, os, re, random, sqlite3
 from urllib.parse import urlparse
+from typing import Optional, Union   # <-- added for union types
 import httpx
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
@@ -77,7 +78,7 @@ def is_admin(user_id):
     return user_id == ADMIN_ID
 
 # ---------- Proxy parser ----------
-def parse_proxy_url(url: str) -> dict | None:
+def parse_proxy_url(url: str) -> Optional[dict]:
     if not url: return None
     try:
         parsed = urlparse(url)
@@ -93,7 +94,7 @@ def parse_proxy_url(url: str) -> dict | None:
 OTP_API_BASE = "https://otpdoctor.in/stubs/handler_api.php"
 _service_cache = {}
 
-async def _otp_request(params: dict) -> dict | str:
+async def _otp_request(params: dict) -> Union[dict, str]:
     params["api_key"] = OTP_DOCTOR_API_KEY
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(OTP_API_BASE, params=params)
@@ -194,7 +195,7 @@ async def cancel_activation(activation_id: str):
         logger.warning(f"取消激活失败（非关键）: {e}")
 
 # ---------- 2Captcha ----------
-async def solve_captcha(page) -> str | None:
+async def solve_captcha(page) -> Optional[str]:
     if not CAPTCHA_API_KEY: return None
     url = page.url
     sitekey = await page.evaluate('''()=>{
@@ -332,19 +333,16 @@ def get_main_menu():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    # Maintenance check
     if is_maintenance_on() and not is_admin(user_id):
         await update.message.reply_text("⚠️ Bot is under maintenance. Please try later.")
         return
 
-    # Send video frame if set
     video_id = get_video_file_id()
     if video_id:
         try:
             await update.message.reply_video(video_id, caption="🎥 Welcome video")
         except:
             await update.message.reply_photo(video_id, caption="🎥 Welcome frame")
-    # Send QR if set
     qr_id = get_qr_file_id()
     if qr_id:
         try:
@@ -352,7 +350,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-    # Main menu
     text = "👋 Fully automated Gmail creator.\nTap below to open the Web App, or use the inline menu:"
     buttons = []
     if WEB_APP_URL:
@@ -393,7 +390,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     data = query.data
     user_id = query.from_user.id
 
-    # Maintenance check (allow admin only)
     if is_maintenance_on() and not is_admin(user_id):
         await query.edit_message_text("⚠️ Bot is under maintenance.")
         return
@@ -479,7 +475,6 @@ async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👑 Admin Panel", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_panel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Used when editing from callback
     query = update.callback_query
     await query.answer()
     maintenance = is_maintenance_on()
@@ -502,7 +497,7 @@ async def handle_admin_callbacks(query: Update, context: ContextTypes.DEFAULT_TY
         current = is_maintenance_on()
         set_config('maintenance', '0' if current else '1')
         await query.answer(f"Maintenance {'ON' if not current else 'OFF'}")
-        await admin_panel_edit(query, context)  # refresh panel
+        await admin_panel_edit(query, context)
     elif data == "admin_upload_video":
         await query.edit_message_text("📤 Send me a video or photo to set as the welcome frame.")
         return ADMIN_UPLOAD_VIDEO
@@ -510,7 +505,6 @@ async def handle_admin_callbacks(query: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("📤 Send me a photo to set as the QR code.")
         return ADMIN_UPLOAD_QR
     elif data == "admin_stats":
-        # Fetch stats
         total_users = DB.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         total_deposits = DB.execute("SELECT COUNT(*) FROM deposits").fetchone()[0]
         total_orders = DB.execute("SELECT COUNT(*) FROM email_orders").fetchone()[0]
@@ -664,7 +658,6 @@ async def run_creation(bot, chat_id, msg_id, uid, email, pwd):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Admin conversation
     admin_conv = ConversationHandler(
         entry_points=[CommandHandler("admin", admin_command)],
         states={
@@ -675,7 +668,6 @@ def main():
         fallbacks=[CommandHandler("cancel", admin_cancel)]
     )
 
-    # Deposit conversation
     dep_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^deposit$")],
         states={
@@ -685,7 +677,6 @@ def main():
         fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
     )
 
-    # Email creation conversation
     email_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^email_create$")],
         states={
