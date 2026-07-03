@@ -1,6 +1,6 @@
 import asyncio, logging, os, re, random, sqlite3
 from urllib.parse import urlparse
-from typing import Optional, Union   # <-- added for union types
+from typing import Optional, Union
 import httpx
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
@@ -116,7 +116,7 @@ async def get_countries() -> dict:
         return result
     raise Exception(f"获取国家列表失败: {result}")
 
-async def get_services(country: str = "any") -> dict:
+async def get_services(country: str) -> dict:
     result = await _otp_request({"action": "getServices", "country": country})
     if isinstance(result, dict):
         return result
@@ -126,12 +126,29 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
     cache_key = f"{service_name}_{country}"
     if cache_key in _service_cache:
         return _service_cache[cache_key]
-    services = await get_services(country)
-    for sid, name in services.items():
-        if service_name.lower() in name.lower():
-            _service_cache[cache_key] = sid
-            return sid
-    raise Exception(f"未找到服务: {service_name}")
+
+    # If country is "any", try all available countries until we find the service
+    if country == "any":
+        countries = await get_countries()
+        for country_code in countries.keys():
+            try:
+                services = await get_services(country_code)
+                for sid, name in services.items():
+                    if service_name.lower() in name.lower():
+                        _service_cache[cache_key] = sid
+                        logger.info(f"Found service '{service_name}' in country {country_code} with ID {sid}")
+                        return sid
+            except Exception as e:
+                logger.warning(f"Could not fetch services for {country_code}: {e}")
+                continue
+        raise Exception(f"No country found that offers service: {service_name}")
+    else:
+        services = await get_services(country)
+        for sid, name in services.items():
+            if service_name.lower() in name.lower():
+                _service_cache[cache_key] = sid
+                return sid
+        raise Exception(f"Service {service_name} not found in country {country}")
 
 async def buy_number(service: str, max_price: float = 100) -> dict:
     if not service.isdigit():
