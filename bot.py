@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS email_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER, desired_email TEXT, password TEXT,
     status TEXT DEFAULT 'processing',
-    cost REAL DEFAULT 10.0,
+    cost REAL DEFAULT 30.0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS bot_config (
@@ -124,14 +124,11 @@ async def get_services(country: str) -> dict:
     result = await _otp_request({"action": "getServices", "country": country})
     
     if isinstance(result, dict):
-        # Some responses have a 'services' key
         if "services" in result and isinstance(result["services"], dict):
             return result["services"]
-        # Otherwise, assume result itself is the service dict
         return result
     
     elif isinstance(result, list):
-        # Convert list of {id, name} to dict
         services = {}
         for item in result:
             if isinstance(item, dict):
@@ -150,7 +147,6 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
     if cache_key in _service_cache:
         return _service_cache[cache_key]
 
-    # Build list of countries to try: hardcoded common ones first, then dynamic
     countries_to_try = ["us", "gb", "in", "ru", "ua", "pl", "de", "fr", "es", "it"]
     if country != "any":
         countries_to_try = [country]
@@ -167,7 +163,6 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
 
     service_variants = [service_name.lower(), "gmail", "googlemail"]
 
-    # Debug: fetch and log the service list for US (first country)
     if "us" in countries_to_try:
         try:
             us_services = await get_services("us")
@@ -180,7 +175,6 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
             services = await get_services(country_code)
             for sid, name in services.items():
                 if isinstance(name, dict):
-                    # Try to extract name from dict
                     name = name.get("name") or name.get("service") or str(name)
                 if not isinstance(name, str):
                     continue
@@ -192,7 +186,7 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
                         return sid
         except Exception as e:
             logger.warning(f"Could not fetch services for {country_code}: {e}")
-            await asyncio.sleep(1)  # avoid rate limits
+            await asyncio.sleep(1)
             continue
 
     raise Exception(f"No country found that offers service: {service_name}")
@@ -386,66 +380,101 @@ async def create_gmail_auto(username: str, password: str) -> str:
         await cancel_activation(activation_id)
         raise e
 
-# ---------- Bot UI ----------
+# ---------- Bot UI / Animations ----------
 def get_main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📧 Create Email", callback_data="email_create")],
-        [InlineKeyboardButton("💰 Wallet", callback_data="wallet")],
-        [InlineKeyboardButton("📞 Admin Contact", url="tg://user?id=Xricx0")],
-        [InlineKeyboardButton("🔐 Login", callback_data="login")],
+        [InlineKeyboardButton("📧 Create New Email (₹30)", callback_data="email_create")],
+        [InlineKeyboardButton("💳 My Wallet & Balance", callback_data="wallet")],
+        [InlineKeyboardButton("📞 Contact Support/Admin", url="tg://user?id=Xricx0")],
+        [InlineKeyboardButton("🔐 Secure Login", callback_data="login")],
     ])
+
+async def loading_animation(bot, chat_id, msg_id):
+    """Simple animation task to show progress to the user while waiting."""
+    frames = [
+        "⏳ <b>Initializing...</b> [■□□□□□□□□□]",
+        "⚙️ <b>Connecting...</b> [■■□□□□□□□□]",
+        "🌐 <b>Opening Network...</b> [■■■□□□□□□□]",
+        "🤖 <b>Bypassing Captchas...</b> [■■■■□□□□□□]",
+        "📱 <b>Fetching OTP...</b> [■■■■■□□□□□]",
+        "📞 <b>Waiting for SMS...</b> [■■■■■■□□□□]",
+        "✅ <b>SMS Received!</b> [■■■■■■■□□□]",
+        "📝 <b>Finalizing Details...</b> [■■■■■■■■□□]",
+        "✨ <b>Almost Done...</b> [■■■■■■■■■□]",
+        "🚀 <b>Finishing Up...</b> [■■■■■■■■■■]"
+    ]
+    try:
+        while True:
+            for frame in frames:
+                await bot.edit_message_text(
+                    chat_id=chat_id, 
+                    message_id=msg_id, 
+                    text=f"<b>✨ Automated Gmail Creator ✨</b>\n\n{frame}\n\n<i>Please be patient, this takes about 1-2 minutes.</i>", 
+                    parse_mode="HTML"
+                )
+                await asyncio.sleep(2.5)
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_maintenance_on() and not is_admin(user_id):
-        await update.message.reply_text("⚠️ Bot is under maintenance. Please try later.")
+        await update.message.reply_text("⚠️ <b>Bot is under maintenance.</b> Please try again later.", parse_mode="HTML")
         return
 
     video_id = get_video_file_id()
     if video_id:
         try:
-            await update.message.reply_video(video_id, caption="🎥 Welcome video")
+            await update.message.reply_video(video_id, caption="🎥 <b>Welcome to Gmail Creator Bot!</b>", parse_mode="HTML")
         except:
-            await update.message.reply_photo(video_id, caption="🎥 Welcome frame")
+            await update.message.reply_photo(video_id, caption="📸 <b>Welcome to Gmail Creator Bot!</b>", parse_mode="HTML")
     qr_id = get_qr_file_id()
     if qr_id:
         try:
-            await update.message.reply_photo(qr_id, caption="📱 Scan to pay")
+            await update.message.reply_photo(qr_id, caption="📱 <b>Scan to Pay & Deposit</b>", parse_mode="HTML")
         except:
             pass
 
-    text = "👋 Fully automated Gmail creator.\nTap below to open the Web App, or use the inline menu:"
+    text = (
+        "👋 <b>Welcome to the Fully Automated Gmail Creator!</b>\n\n"
+        "✨ Fast, reliable, and secure.\n"
+        "💰 <b>Current Price:</b> ₹30 per Gmail account\n\n"
+        "<i>Tap below to open the Web App, or use the interactive menu:</i>"
+    )
     buttons = []
     if WEB_APP_URL:
-        buttons.append([InlineKeyboardButton("🚀 Open Creator", web_app=WebAppInfo(url=WEB_APP_URL))])
+        buttons.append([InlineKeyboardButton("🚀 Open Web Creator", web_app=WebAppInfo(url=WEB_APP_URL))])
     buttons.extend(get_main_menu().inline_keyboard)
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_maintenance_on() and not is_admin(user_id):
-        await update.message.reply_text("⚠️ Bot is under maintenance.")
+        await update.message.reply_text("⚠️ <b>Bot is under maintenance.</b>", parse_mode="HTML")
         return
 
     data = update.message.web_app_data.data
     if data == "email_create":
-        await update.message.reply_text("Enter desired username (without @gmail.com):")
+        await update.message.reply_text("✉️ <b>Enter desired username</b> (without @gmail.com):", parse_mode="HTML")
         return EMAIL_USERNAME
     elif data == "wallet":
         user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            await update.message.reply_text("Please /login first.")
+            await update.message.reply_text("🛑 Please click <b>🔐 Secure Login</b> first.", parse_mode="HTML")
             return
-        await update.message.reply_text(f"💰 Balance: ₹{user['balance']:.2f}")
+        await update.message.reply_text(f"💰 <b>Your Current Balance:</b> ₹{user['balance']:.2f}", parse_mode="HTML")
     elif data == "admin_contact":
-        await update.message.reply_text("Contact admin: @Xricx0")
+        await update.message.reply_text("👨‍💻 <b>Contact admin:</b> @Xricx0", parse_mode="HTML")
     elif data == "login":
         DB.execute("INSERT OR IGNORE INTO users (user_id,username,first_name) VALUES (?,?,?)",
                    (user_id, update.effective_user.username, update.effective_user.first_name))
         DB.commit()
-        await update.message.reply_text("✅ Logged in!")
+        await update.message.reply_text("✅ <b>Successfully Logged in!</b>", parse_mode="HTML")
     else:
-        await update.message.reply_text("Unknown action.")
+        await update.message.reply_text("❓ Unknown action.")
     return ConversationHandler.END
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -455,32 +484,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = query.from_user.id
 
     if is_maintenance_on() and not is_admin(user_id):
-        await query.edit_message_text("⚠️ Bot is under maintenance.")
+        await query.edit_message_text("⚠️ <b>Bot is under maintenance.</b>", parse_mode="HTML")
         return
 
     if data == "login":
         DB.execute("INSERT OR IGNORE INTO users (user_id,username,first_name) VALUES (?,?,?)",
                    (user_id, query.from_user.username, query.from_user.first_name))
         DB.commit()
-        await query.edit_message_text("✅ Logged in!", reply_markup=get_main_menu())
+        await query.edit_message_text("✅ <b>Successfully Logged in!</b> Ready to use.", parse_mode="HTML", reply_markup=get_main_menu())
     elif data == "wallet":
         user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            await query.answer("Login first", show_alert=True); return
-        kbd = [[InlineKeyboardButton("📥 Deposit", callback_data="deposit")],
-               [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
-        await query.edit_message_text(f"💰 Balance: ₹{user['balance']:.2f}", reply_markup=InlineKeyboardMarkup(kbd))
+            await query.answer("🛑 Please Login first!", show_alert=True); return
+        kbd = [[InlineKeyboardButton("📥 Deposit Funds", callback_data="deposit")],
+               [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")]]
+        await query.edit_message_text(f"💳 <b>Wallet Dashboard</b>\n\n💰 <b>Balance:</b> ₹{user['balance']:.2f}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kbd))
     elif data == "deposit":
         user = DB.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            await query.answer("Login first", show_alert=True); return
-        await query.edit_message_text("Enter amount:")
+            await query.answer("🛑 Please Login first!", show_alert=True); return
+        await query.edit_message_text("💵 <b>Enter the amount you wish to deposit (in ₹):</b>", parse_mode="HTML")
         return DEPOSIT_AMOUNT
     elif data == "email_create":
-        await query.edit_message_text("Enter desired username (without @gmail.com):")
+        await query.edit_message_text("✉️ <b>Enter desired username</b> (without @gmail.com):", parse_mode="HTML")
         return EMAIL_USERNAME
     elif data == "main_menu":
-        await query.edit_message_text("Main Menu:", reply_markup=get_main_menu())
+        await query.edit_message_text("🌟 <b>Main Menu:</b> What would you like to do?", parse_mode="HTML", reply_markup=get_main_menu())
     elif data.startswith("appdep_") or data.startswith("rejdep_"):
         await handle_admin_deposits(query, context, data)
     elif data.startswith("admin_"):
@@ -489,23 +518,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ---------- Admin deposit handling ----------
 async def handle_admin_deposits(query, context, data):
     if not is_admin(query.from_user.id):
-        await query.answer("Unauthorized", show_alert=True); return
+        await query.answer("🛑 Unauthorized", show_alert=True); return
     action, dep_id = data.split("_")
     dep_id = int(dep_id)
     dep = DB.execute("SELECT * FROM deposits WHERE id=?", (dep_id,)).fetchone()
     if not dep or dep["status"] != "pending":
-        await query.edit_message_caption(caption="Already processed."); return
+        await query.edit_message_caption(caption="⚠️ Already processed.")
+        return
     if action == "appdep":
         DB.execute("UPDATE deposits SET status='approved' WHERE id=?", (dep_id,))
         DB.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (dep["amount"], dep["user_id"]))
         DB.commit()
-        await query.edit_message_caption(caption=f"✅ Deposit #{dep_id} approved.")
-        await context.bot.send_message(dep["user_id"], f"✅ ₹{dep['amount']} added!")
+        await query.edit_message_caption(caption=f"✅ <b>Deposit #{dep_id} approved!</b>", parse_mode="HTML")
+        await context.bot.send_message(dep["user_id"], f"🎉 <b>Success!</b> ₹{dep['amount']} has been added to your wallet.", parse_mode="HTML")
     else:
         DB.execute("UPDATE deposits SET status='rejected' WHERE id=?", (dep_id,))
         DB.commit()
-        await query.edit_message_caption(caption=f"❌ Deposit #{dep_id} rejected.")
-        await context.bot.send_message(dep["user_id"], "❌ Deposit rejected.")
+        await query.edit_message_caption(caption=f"❌ <b>Deposit #{dep_id} rejected.</b>", parse_mode="HTML")
+        await context.bot.send_message(dep["user_id"], "❌ <b>Deposit rejected.</b> Please contact admin for details.", parse_mode="HTML")
 
 # ---------- Admin Panel ----------
 ADMIN_PASSWORD = "sidhu01"
@@ -513,9 +543,9 @@ ADMIN_MAIN, ADMIN_UPLOAD_VIDEO, ADMIN_UPLOAD_QR = range(10, 13)
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ You are not authorized.")
+        await update.message.reply_text("⛔ <b>You are not authorized.</b>", parse_mode="HTML")
         return
-    await update.message.reply_text("🔐 Enter admin password:")
+    await update.message.reply_text("🔐 <b>Enter admin password:</b>", parse_mode="HTML")
     return ADMIN_MAIN
 
 async def admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -523,7 +553,7 @@ async def admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_admin_panel(update, context)
         return ConversationHandler.END
     else:
-        await update.message.reply_text("❌ Wrong password. Try /admin again.")
+        await update.message.reply_text("❌ <b>Wrong password.</b> Try /admin again.", parse_mode="HTML")
         return ConversationHandler.END
 
 async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -536,7 +566,7 @@ async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Bot Management", callback_data="admin_stats")],
         [InlineKeyboardButton("❌ Close Panel", callback_data="admin_close")]
     ]
-    await update.message.reply_text("👑 Admin Panel", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("👑 <b>Admin Control Panel</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def admin_panel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -550,7 +580,7 @@ async def admin_panel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Bot Management", callback_data="admin_stats")],
         [InlineKeyboardButton("❌ Close Panel", callback_data="admin_close")]
     ]
-    await query.edit_message_text("👑 Admin Panel", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("👑 <b>Admin Control Panel</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def handle_admin_callbacks(query: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
     user_id = query.from_user.id
@@ -563,10 +593,10 @@ async def handle_admin_callbacks(query: Update, context: ContextTypes.DEFAULT_TY
         await query.answer(f"Maintenance {'ON' if not current else 'OFF'}")
         await admin_panel_edit(query, context)
     elif data == "admin_upload_video":
-        await query.edit_message_text("📤 Send me a video or photo to set as the welcome frame.")
+        await query.edit_message_text("📤 <b>Send me a video or photo</b> to set as the welcome frame.", parse_mode="HTML")
         return ADMIN_UPLOAD_VIDEO
     elif data == "admin_upload_qr":
-        await query.edit_message_text("📤 Send me a photo to set as the QR code.")
+        await query.edit_message_text("📤 <b>Send me a photo</b> to set as the QR deposit code.", parse_mode="HTML")
         return ADMIN_UPLOAD_QR
     elif data == "admin_stats":
         total_users = DB.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -574,51 +604,51 @@ async def handle_admin_callbacks(query: Update, context: ContextTypes.DEFAULT_TY
         total_orders = DB.execute("SELECT COUNT(*) FROM email_orders").fetchone()[0]
         pending_deposits = DB.execute("SELECT COUNT(*) FROM deposits WHERE status='pending'").fetchone()[0]
         stats_text = (
-            f"📊 Bot Statistics:\n"
-            f"👥 Users: {total_users}\n"
-            f"💰 Total Deposits: {total_deposits}\n"
-            f"📧 Email Orders: {total_orders}\n"
-            f"⏳ Pending Deposits: {pending_deposits}"
+            f"📊 <b>Bot Statistics:</b>\n\n"
+            f"👥 <b>Users:</b> {total_users}\n"
+            f"💰 <b>Total Deposits:</b> {total_deposits}\n"
+            f"📧 <b>Email Orders:</b> {total_orders}\n"
+            f"⏳ <b>Pending Deposits:</b> {pending_deposits}"
         )
-        await query.edit_message_text(stats_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]]))
+        await query.edit_message_text(stats_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]]))
     elif data == "admin_back":
         await admin_panel_edit(query, context)
     elif data == "admin_close":
-        await query.edit_message_text("Panel closed.")
+        await query.edit_message_text("🔒 <b>Panel closed.</b>", parse_mode="HTML")
         return ConversationHandler.END
 
 async def admin_upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Unauthorized.")
+        await update.message.reply_text("⛔ Unauthorized.")
         return ConversationHandler.END
     if update.message.video:
         file_id = update.message.video.file_id
     elif update.message.photo:
         file_id = update.message.photo[-1].file_id
     else:
-        await update.message.reply_text("Please send a video or photo.")
+        await update.message.reply_text("⚠️ Please send a video or photo.")
         return ADMIN_UPLOAD_VIDEO
     set_config('video_file_id', file_id)
-    await update.message.reply_text("✅ Video frame updated successfully!")
+    await update.message.reply_text("✅ <b>Video frame updated successfully!</b>", parse_mode="HTML")
     await show_admin_panel(update, context)
     return ConversationHandler.END
 
 async def admin_upload_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Unauthorized.")
+        await update.message.reply_text("⛔ Unauthorized.")
         return ConversationHandler.END
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
     else:
-        await update.message.reply_text("Please send a photo.")
+        await update.message.reply_text("⚠️ Please send a photo.")
         return ADMIN_UPLOAD_QR
     set_config('qr_file_id', file_id)
-    await update.message.reply_text("✅ QR code updated successfully!")
+    await update.message.reply_text("✅ <b>QR code updated successfully!</b>", parse_mode="HTML")
     await show_admin_panel(update, context)
     return ConversationHandler.END
 
 async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Admin action cancelled.")
+    await update.message.reply_text("🚫 Admin action cancelled.")
     return ConversationHandler.END
 
 # ---------- Deposit Conversation ----------
@@ -632,13 +662,13 @@ async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amt = float(update.message.text)
     except:
-        await update.message.reply_text("Invalid number"); return DEPOSIT_AMOUNT
+        await update.message.reply_text("⚠️ <b>Invalid number.</b> Please enter numbers only.", parse_mode="HTML"); return DEPOSIT_AMOUNT
     context.user_data["deposit_amount"] = amt
     if os.path.exists("qr_code.jpg"):
         with open("qr_code.jpg", "rb") as f:
-            await update.message.reply_photo(f, caption=f"Scan ₹{amt}. Send screenshot.")
+            await update.message.reply_photo(f, caption=f"📱 <b>Scan to Pay:</b> ₹{amt}\n\n<i>📸 Please send a screenshot of your successful transaction here.</i>", parse_mode="HTML")
     else:
-        await update.message.reply_text(f"Transfer ₹{amt} and send TXID.")
+        await update.message.reply_text(f"💳 <b>Transfer ₹{amt}</b> to our account and reply with your Transaction ID (TXID) or Screenshot.", parse_mode="HTML")
     return DEPOSIT_SCREENSHOT
 
 async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -653,12 +683,12 @@ async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
     DB.commit()
     admin_kbd = [[InlineKeyboardButton("✅ Approve", callback_data=f"appdep_{dep_id}"),
                   InlineKeyboardButton("❌ Reject", callback_data=f"rejdep_{dep_id}")]]
-    msg = f"Deposit #{dep_id} by {user_id}\nAmount: ₹{amt}"
+    msg = f"🔔 <b>New Deposit #{dep_id}</b> by {user_id}\n💰 <b>Amount:</b> ₹{amt}"
     if update.message.photo:
-        await context.bot.send_photo(ADMIN_ID, file_id, caption=msg, reply_markup=InlineKeyboardMarkup(admin_kbd))
+        await context.bot.send_photo(ADMIN_ID, file_id, caption=msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(admin_kbd))
     else:
-        await context.bot.send_message(ADMIN_ID, f"{msg}\nTxID: {file_id}", reply_markup=InlineKeyboardMarkup(admin_kbd))
-    await update.message.reply_text("✅ Submitted. Admin will verify.", reply_markup=get_main_menu())
+        await context.bot.send_message(ADMIN_ID, f"{msg}\n🧾 <b>TxID:</b> {file_id}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(admin_kbd))
+    await update.message.reply_text("✅ <b>Submitted Successfully!</b>\n\n<i>An admin will verify your transaction shortly.</i>", parse_mode="HTML", reply_markup=get_main_menu())
     return ConversationHandler.END
 
 # ---------- Email Creation Conversation ----------
@@ -671,9 +701,9 @@ async def email_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     usr = update.message.text.strip()
     if not re.match(r'^[a-zA-Z0-9._]{6,30}$', usr):
-        await update.message.reply_text("Invalid username (6-30 chars)."); return EMAIL_USERNAME
+        await update.message.reply_text("⚠️ <b>Invalid username!</b> Must be 6-30 characters long (letters, numbers, dots).", parse_mode="HTML"); return EMAIL_USERNAME
     context.user_data["desired_email"] = usr
-    await update.message.reply_text("Enter password (min 8 chars):")
+    await update.message.reply_text("🔑 <b>Enter a strong password</b> (minimum 8 characters):", parse_mode="HTML")
     return EMAIL_PASSWORD
 
 async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -683,40 +713,61 @@ async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     pwd = update.message.text.strip()
     if len(pwd) < 8:
-        await update.message.reply_text("Too short (min 8)."); return EMAIL_PASSWORD
+        await update.message.reply_text("⚠️ <b>Password too short!</b> Minimum 8 characters required.", parse_mode="HTML"); return EMAIL_PASSWORD
     uid = update.effective_user.id
     desired = context.user_data["desired_email"]
-    cost = 10.0
+    cost = 30.0
 
     user = DB.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
     if not user:
-        await update.message.reply_text("❌ Login first.", reply_markup=get_main_menu()); return ConversationHandler.END
+        await update.message.reply_text("🛑 <b>Please login first.</b>", parse_mode="HTML", reply_markup=get_main_menu()); return ConversationHandler.END
     if user["balance"] < cost:
-        await update.message.reply_text(f"❌ Insufficient balance (₹{cost}). Deposit please.", reply_markup=get_main_menu()); return ConversationHandler.END
+        await update.message.reply_text(f"❌ <b>Insufficient balance!</b>\n\nYou need ₹{cost} to create a Gmail account. Please deposit funds via Wallet.", parse_mode="HTML", reply_markup=get_main_menu()); return ConversationHandler.END
 
     DB.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (cost, uid))
     DB.execute("INSERT INTO email_orders (user_id,desired_email,password,cost) VALUES (?,?,?,?)",
                (uid, desired, pwd, cost))
     DB.commit()
 
-    msg = await update.message.reply_text("⏳ Creating your Gmail... (this takes ~2 min)")
+    msg = await update.message.reply_text("⏳ <b>Initializing Gmail Creator...</b>\n\n<i>Starting engines...</i>", parse_mode="HTML")
     asyncio.create_task(run_creation(context.bot, update.effective_chat.id, msg.message_id, uid, desired, pwd))
     return ConversationHandler.END
 
 async def run_creation(bot, chat_id, msg_id, uid, email, pwd):
+    # Start the visual loading animation task
+    anim_task = asyncio.create_task(loading_animation(bot, chat_id, msg_id))
+    
     try:
         creds = await create_gmail_auto(email, pwd)
+        # Cancel animation once process succeeds
+        anim_task.cancel()
+        
         DB.execute("UPDATE email_orders SET status='completed' WHERE desired_email=? AND user_id=?", (email, uid))
         DB.commit()
-        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                    text=f"✅ Created:\n`{creds}`", parse_mode="Markdown")
+        success_text = (
+            "🎉 <b>ACCOUNT CREATED SUCCESSFULLY!</b> 🎉\n\n"
+            "📧 <b>Email:</b> <code>{}</code>\n"
+            "🔑 <b>Password:</b> <code>{}</code>\n\n"
+            "<i>Please save your credentials securely!</i>"
+        ).format(creds.split(":")[0], creds.split(":")[1])
+        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=success_text, parse_mode="HTML")
+        
     except Exception as e:
+        # Cancel animation once process fails
+        anim_task.cancel()
         logger.exception("Auto creation failed")
-        DB.execute("UPDATE users SET balance = balance + 10 WHERE user_id=?", (uid,))
+        
+        # Refund exactly ₹30
+        DB.execute("UPDATE users SET balance = balance + 30 WHERE user_id=?", (uid,))
         DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?", (email, uid))
         DB.commit()
-        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
-                                    text=f"❌ Failed: {str(e)[:200]}\nRefunded ₹10.")
+        
+        fail_text = (
+            "❌ <b>Creation Failed!</b>\n\n"
+            f"<i>Reason:</i> {str(e)[:150]}...\n\n"
+            "🔄 <b>Refunded ₹30</b> back to your wallet."
+        )
+        await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=fail_text, parse_mode="HTML")
 
 # ---------- Main ----------
 def main():
