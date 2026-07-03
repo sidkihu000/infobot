@@ -1,4 +1,4 @@
 python-telegram-bot==20.0
 playwright==1.40.0
-httpx==0.25.0
+httpx==0.23.1.
 python-dotenv==1.0.0
