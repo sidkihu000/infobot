@@ -12,7 +12,7 @@ from telegram.ext import (
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
-SIMS_API_KEY = os.getenv("SIMS_API_KEY", "03b8ccc51ef4cdc16246fdb3c4668b21")
+OTP_DOCTOR_API_KEY = os.getenv("OTP_DOCTOR_API_KEY", "iztbgplf1l5fbwsk5fqfsrqqcweaxn2w")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6Lf6U0EtAAAAABLduy-p5ch0aDrvBcFacxnHRKIJ")
 PROXY_URL = os.getenv("PROXY_URL", "8ZdCh8tMpCpgwwPeDPJzddE2mEmpVAjBV1mVwTQ657En")
 WEB_APP_URL = os.getenv("WEB_APP_URL", "")
@@ -20,9 +20,10 @@ WEB_APP_URL = os.getenv("WEB_APP_URL", "")
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Database
+# ---------- Database ----------
 DB = sqlite3.connect("bot_data.db", check_same_thread=False)
 DB.row_factory = sqlite3.Row
+
 DB.executescript("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -44,10 +45,38 @@ CREATE TABLE IF NOT EXISTS email_orders (
     cost REAL DEFAULT 10.0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS bot_config (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+INSERT OR IGNORE INTO bot_config (key, value) VALUES ('maintenance', '0');
+INSERT OR IGNORE INTO bot_config (key, value) VALUES ('video_file_id', '');
+INSERT OR IGNORE INTO bot_config (key, value) VALUES ('qr_file_id', '');
 """)
 DB.commit()
 
-# Proxy parser
+# ---------- Config Helpers ----------
+def get_config(key, default=None):
+    row = DB.execute("SELECT value FROM bot_config WHERE key=?", (key,)).fetchone()
+    return row['value'] if row else default
+
+def set_config(key, value):
+    DB.execute("INSERT OR REPLACE INTO bot_config (key, value) VALUES (?,?)", (key, value))
+    DB.commit()
+
+def is_maintenance_on():
+    return get_config('maintenance', '0') == '1'
+
+def get_video_file_id():
+    return get_config('video_file_id', '')
+
+def get_qr_file_id():
+    return get_config('qr_file_id', '')
+
+def is_admin(user_id):
+    return user_id == ADMIN_ID
+
+# ---------- Proxy parser ----------
 def parse_proxy_url(url: str) -> dict | None:
     if not url: return None
     try:
@@ -60,56 +89,109 @@ def parse_proxy_url(url: str) -> dict | None:
     except:
         return None
 
-# ---------- 4sim API ----------
-SIM_API_BASE = "https://api.4sim.st"
-google_service_id = None
+# ---------- OTPDoctor API ----------
+OTP_API_BASE = "https://otpdoctor.in/stubs/handler_api.php"
+_service_cache = {}
 
-async def fetch_google_service_id():
-    global google_service_id
-    if google_service_id:
-        return google_service_id
+async def _otp_request(params: dict) -> dict | str:
+    params["api_key"] = OTP_DOCTOR_API_KEY
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(f"{SIM_API_BASE}/getServices?apikey={SIMS_API_KEY}")
-        data = resp.json()
-        for service in data.get("services", data):
-            if isinstance(service, dict):
-                name = service.get("name", "").lower()
-                if "google" in name:
-                    google_service_id = service["id"]
-                    logger.info(f"Found Google service ID: {google_service_id}")
-                    return google_service_id
-        raise Exception("Google service not found in 4sim")
+        resp = await client.get(OTP_API_BASE, params=params)
+        text = resp.text.strip()
+        try:
+            return resp.json()
+        except:
+            return text
 
-async def buy_activation() -> dict:
-    sid = await fetch_google_service_id()
-    url = f"{SIM_API_BASE}/buyNumber?apikey={SIMS_API_KEY}&id={sid}&country=any"
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url)
-        data = resp.json()
-        if data.get("status") != "SUCCESS":
-            raise Exception(f"4sim buy failed: {data.get('message', data)}")
-        return {"id": data["id"], "phone": data["number"]}
+async def get_balance() -> float:
+    result = await _otp_request({"action": "getBalance"})
+    if isinstance(result, str) and result.startswith("ACCESS_BALANCE:"):
+        return float(result.split(":")[1])
+    raise Exception(f"获取余额失败: {result}")
 
-async def get_sms(activation_id: str) -> str:
-    for _ in range(10):
-        await asyncio.sleep(30)
-        url = f"{SIM_API_BASE}/checkSms?apikey={SIMS_API_KEY}&id={activation_id}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url)
-            data = resp.json()
-            if data.get("status") == "SUCCESS" and data.get("sms"):
-                sms_text = data["sms"]
-                m = re.search(r'(\d{4,8})', sms_text)
-                return m.group(1) if m else sms_text
-    raise TimeoutError("SMS not received in 5 minutes")
+async def get_countries() -> dict:
+    result = await _otp_request({"action": "getCountries"})
+    if isinstance(result, dict):
+        return result
+    raise Exception(f"获取国家列表失败: {result}")
+
+async def get_services(country: str = "any") -> dict:
+    result = await _otp_request({"action": "getServices", "country": country})
+    if isinstance(result, dict):
+        return result
+    raise Exception(f"获取服务列表失败: {result}")
+
+async def get_service_id(service_name: str, country: str = "any") -> str:
+    cache_key = f"{service_name}_{country}"
+    if cache_key in _service_cache:
+        return _service_cache[cache_key]
+    services = await get_services(country)
+    for sid, name in services.items():
+        if service_name.lower() in name.lower():
+            _service_cache[cache_key] = sid
+            return sid
+    raise Exception(f"未找到服务: {service_name}")
+
+async def buy_number(service: str, max_price: float = 100) -> dict:
+    if not service.isdigit():
+        service = await get_service_id(service)
+    result = await _otp_request({
+        "action": "getNumber",
+        "service": service,
+        "maxPrice": str(max_price)
+    })
+    if isinstance(result, dict) and "id" in result and "number" in result:
+        return result
+    raise Exception(f"购买号码失败: {result}")
+
+async def get_activation_status(activation_id: str) -> dict:
+    result = await _otp_request({
+        "action": "getStatus",
+        "id": activation_id
+    })
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str) and result.startswith("STATUS_"):
+        parts = result.split(":", 1)
+        status = parts[0]
+        code = parts[1] if len(parts) > 1 else None
+        return {"status": status, "code": code}
+    raise Exception(f"获取状态失败: {result}")
+
+async def set_status(activation_id: str, status: int) -> str:
+    result = await _otp_request({
+        "action": "setStatus",
+        "id": activation_id,
+        "status": str(status)
+    })
+    if isinstance(result, str):
+        return result
+    raise Exception(f"设置状态失败: {result}")
+
+async def get_sms(activation_id: str, timeout: int = 300) -> str:
+    start = asyncio.get_event_loop().time()
+    while asyncio.get_event_loop().time() - start < timeout:
+        await asyncio.sleep(10)
+        try:
+            data = await get_activation_status(activation_id)
+            if data.get("status") == "STATUS_OK":
+                code = data.get("code")
+                if code:
+                    m = re.search(r'(\d{4,8})', str(code))
+                    return m.group(1) if m else str(code)
+            elif data.get("status") in ["STATUS_CANCEL", "STATUS_EXPIRED"]:
+                raise Exception(f"激活已取消或过期: {data.get('status')}")
+        except Exception as e:
+            logger.warning(f"检查SMS时出错: {e}")
+            continue
+    raise TimeoutError("SMS未在指定时间内收到")
 
 async def cancel_activation(activation_id: str):
     try:
-        url = f"{SIM_API_BASE}/cancelNumber?apikey={SIMS_API_KEY}&id={activation_id}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            await client.get(url)
+        result = await set_status(activation_id, 2)
+        logger.info(f"取消激活 {activation_id}: {result}")
     except Exception as e:
-        logger.warning(f"Cancel failed (non-critical): {e}")
+        logger.warning(f"取消激活失败（非关键）: {e}")
 
 # ---------- 2Captcha ----------
 async def solve_captcha(page) -> str | None:
@@ -151,10 +233,12 @@ async def solve_captcha(page) -> str | None:
 
 # ---------- Gmail Creator ----------
 async def create_gmail_auto(username: str, password: str) -> str:
-    activation = await buy_activation()
-    phone = activation["phone"]
+    service_id = await get_service_id("google", "any")
+    logger.info(f"Google服务ID: {service_id}")
+    activation = await buy_number(service_id, max_price=100)
+    phone = activation["number"]
     activation_id = activation["id"]
-    logger.info(f"Rented {phone} (activation {activation_id})")
+    logger.info(f"购买号码成功: {phone} (激活ID: {activation_id})")
 
     try:
         async with async_playwright() as p:
@@ -210,9 +294,9 @@ async def create_gmail_auto(username: str, password: str) -> str:
             await page.fill('input[type="tel"]', phone)
             await page.click('button:has-text("Next")')
 
-            logger.info("Waiting for SMS...")
+            logger.info("等待SMS...")
             code = await get_sms(activation_id)
-            logger.info(f"Got code: {code}")
+            logger.info(f"收到验证码: {code}")
             await page.wait_for_selector('input[type="tel"]', timeout=30000)
             await page.fill('input[type="tel"]', code)
             await page.click('button:has-text("Next")')
@@ -227,6 +311,7 @@ async def create_gmail_auto(username: str, password: str) -> str:
                 await page.wait_for_timeout(2000)
             except: pass
 
+            await set_status(activation_id, 1)   # 1 = completed
             await page.wait_for_timeout(4000)
             await browser.close()
 
@@ -246,6 +331,28 @@ def get_main_menu():
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    # Maintenance check
+    if is_maintenance_on() and not is_admin(user_id):
+        await update.message.reply_text("⚠️ Bot is under maintenance. Please try later.")
+        return
+
+    # Send video frame if set
+    video_id = get_video_file_id()
+    if video_id:
+        try:
+            await update.message.reply_video(video_id, caption="🎥 Welcome video")
+        except:
+            await update.message.reply_photo(video_id, caption="🎥 Welcome frame")
+    # Send QR if set
+    qr_id = get_qr_file_id()
+    if qr_id:
+        try:
+            await update.message.reply_photo(qr_id, caption="📱 Scan to pay")
+        except:
+            pass
+
+    # Main menu
     text = "👋 Fully automated Gmail creator.\nTap below to open the Web App, or use the inline menu:"
     buttons = []
     if WEB_APP_URL:
@@ -254,8 +361,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = update.message.web_app_data.data
     user_id = update.effective_user.id
+    if is_maintenance_on() and not is_admin(user_id):
+        await update.message.reply_text("⚠️ Bot is under maintenance.")
+        return
+
+    data = update.message.web_app_data.data
     if data == "email_create":
         await update.message.reply_text("Enter desired username (without @gmail.com):")
         return EMAIL_USERNAME
@@ -280,22 +391,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
     data = query.data
-    uid = query.from_user.id
+    user_id = query.from_user.id
+
+    # Maintenance check (allow admin only)
+    if is_maintenance_on() and not is_admin(user_id):
+        await query.edit_message_text("⚠️ Bot is under maintenance.")
+        return
 
     if data == "login":
         DB.execute("INSERT OR IGNORE INTO users (user_id,username,first_name) VALUES (?,?,?)",
-                   (uid, query.from_user.username, query.from_user.first_name))
+                   (user_id, query.from_user.username, query.from_user.first_name))
         DB.commit()
         await query.edit_message_text("✅ Logged in!", reply_markup=get_main_menu())
     elif data == "wallet":
-        user = DB.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
+        user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
             await query.answer("Login first", show_alert=True); return
         kbd = [[InlineKeyboardButton("📥 Deposit", callback_data="deposit")],
                [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
         await query.edit_message_text(f"💰 Balance: ₹{user['balance']:.2f}", reply_markup=InlineKeyboardMarkup(kbd))
     elif data == "deposit":
-        user = DB.execute("SELECT user_id FROM users WHERE user_id=?", (uid,)).fetchone()
+        user = DB.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
             await query.answer("Login first", show_alert=True); return
         await query.edit_message_text("Enter amount:")
@@ -307,10 +423,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text("Main Menu:", reply_markup=get_main_menu())
     elif data.startswith("appdep_") or data.startswith("rejdep_"):
         await handle_admin_deposits(query, context, data)
+    elif data.startswith("admin_"):
+        await handle_admin_callbacks(query, context, data)
 
 # ---------- Admin deposit handling ----------
 async def handle_admin_deposits(query, context, data):
-    if query.from_user.id != ADMIN_ID:
+    if not is_admin(query.from_user.id):
         await query.answer("Unauthorized", show_alert=True); return
     action, dep_id = data.split("_")
     dep_id = int(dep_id)
@@ -329,10 +447,130 @@ async def handle_admin_deposits(query, context, data):
         await query.edit_message_caption(caption=f"❌ Deposit #{dep_id} rejected.")
         await context.bot.send_message(dep["user_id"], "❌ Deposit rejected.")
 
+# ---------- Admin Panel ----------
+ADMIN_PASSWORD = "sidhu01"
+ADMIN_MAIN, ADMIN_UPLOAD_VIDEO, ADMIN_UPLOAD_QR = range(10, 13)
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized.")
+        return
+    await update.message.reply_text("🔐 Enter admin password:")
+    return ADMIN_MAIN
+
+async def admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text.strip() == ADMIN_PASSWORD:
+        await show_admin_panel(update, context)
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("❌ Wrong password. Try /admin again.")
+        return ConversationHandler.END
+
+async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    maintenance = is_maintenance_on()
+    status_text = "🟢 ON" if maintenance else "🔴 OFF"
+    keyboard = [
+        [InlineKeyboardButton(f"🛠 Toggle Maintenance ({status_text})", callback_data="admin_toggle")],
+        [InlineKeyboardButton("🎬 Update Video Frame", callback_data="admin_upload_video")],
+        [InlineKeyboardButton("📸 Update QR Code", callback_data="admin_upload_qr")],
+        [InlineKeyboardButton("📊 Bot Management", callback_data="admin_stats")],
+        [InlineKeyboardButton("❌ Close Panel", callback_data="admin_close")]
+    ]
+    await update.message.reply_text("👑 Admin Panel", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_panel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Used when editing from callback
+    query = update.callback_query
+    await query.answer()
+    maintenance = is_maintenance_on()
+    status_text = "🟢 ON" if maintenance else "🔴 OFF"
+    keyboard = [
+        [InlineKeyboardButton(f"🛠 Toggle Maintenance ({status_text})", callback_data="admin_toggle")],
+        [InlineKeyboardButton("🎬 Update Video Frame", callback_data="admin_upload_video")],
+        [InlineKeyboardButton("📸 Update QR Code", callback_data="admin_upload_qr")],
+        [InlineKeyboardButton("📊 Bot Management", callback_data="admin_stats")],
+        [InlineKeyboardButton("❌ Close Panel", callback_data="admin_close")]
+    ]
+    await query.edit_message_text("👑 Admin Panel", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_admin_callbacks(query: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
+    user_id = query.from_user.id
+    if not is_admin(user_id):
+        await query.answer("Unauthorized", show_alert=True); return
+
+    if data == "admin_toggle":
+        current = is_maintenance_on()
+        set_config('maintenance', '0' if current else '1')
+        await query.answer(f"Maintenance {'ON' if not current else 'OFF'}")
+        await admin_panel_edit(query, context)  # refresh panel
+    elif data == "admin_upload_video":
+        await query.edit_message_text("📤 Send me a video or photo to set as the welcome frame.")
+        return ADMIN_UPLOAD_VIDEO
+    elif data == "admin_upload_qr":
+        await query.edit_message_text("📤 Send me a photo to set as the QR code.")
+        return ADMIN_UPLOAD_QR
+    elif data == "admin_stats":
+        # Fetch stats
+        total_users = DB.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        total_deposits = DB.execute("SELECT COUNT(*) FROM deposits").fetchone()[0]
+        total_orders = DB.execute("SELECT COUNT(*) FROM email_orders").fetchone()[0]
+        pending_deposits = DB.execute("SELECT COUNT(*) FROM deposits WHERE status='pending'").fetchone()[0]
+        stats_text = (
+            f"📊 Bot Statistics:\n"
+            f"👥 Users: {total_users}\n"
+            f"💰 Total Deposits: {total_deposits}\n"
+            f"📧 Email Orders: {total_orders}\n"
+            f"⏳ Pending Deposits: {pending_deposits}"
+        )
+        await query.edit_message_text(stats_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]]))
+    elif data == "admin_back":
+        await admin_panel_edit(query, context)
+    elif data == "admin_close":
+        await query.edit_message_text("Panel closed.")
+        return ConversationHandler.END
+
+async def admin_upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Unauthorized.")
+        return ConversationHandler.END
+    if update.message.video:
+        file_id = update.message.video.file_id
+    elif update.message.photo:
+        file_id = update.message.photo[-1].file_id
+    else:
+        await update.message.reply_text("Please send a video or photo.")
+        return ADMIN_UPLOAD_VIDEO
+    set_config('video_file_id', file_id)
+    await update.message.reply_text("✅ Video frame updated successfully!")
+    await show_admin_panel(update, context)
+    return ConversationHandler.END
+
+async def admin_upload_qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Unauthorized.")
+        return ConversationHandler.END
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+    else:
+        await update.message.reply_text("Please send a photo.")
+        return ADMIN_UPLOAD_QR
+    set_config('qr_file_id', file_id)
+    await update.message.reply_text("✅ QR code updated successfully!")
+    await show_admin_panel(update, context)
+    return ConversationHandler.END
+
+async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Admin action cancelled.")
+    return ConversationHandler.END
+
 # ---------- Deposit Conversation ----------
 DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
 
 async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if is_maintenance_on() and not is_admin(user_id):
+        await update.message.reply_text("⚠️ Bot is under maintenance.")
+        return ConversationHandler.END
     try:
         amt = float(update.message.text)
     except:
@@ -346,15 +584,18 @@ async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return DEPOSIT_SCREENSHOT
 
 async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+    user_id = update.effective_user.id
+    if is_maintenance_on() and not is_admin(user_id):
+        await update.message.reply_text("⚠️ Bot is under maintenance.")
+        return ConversationHandler.END
     amt = context.user_data.get("deposit_amount",0)
     file_id = update.message.photo[-1].file_id if update.message.photo else update.message.text
-    cur = DB.execute("INSERT INTO deposits (user_id,amount,screenshot_file_id) VALUES (?,?,?)", (uid,amt,file_id))
+    cur = DB.execute("INSERT INTO deposits (user_id,amount,screenshot_file_id) VALUES (?,?,?)", (user_id,amt,file_id))
     dep_id = cur.lastrowid
     DB.commit()
     admin_kbd = [[InlineKeyboardButton("✅ Approve", callback_data=f"appdep_{dep_id}"),
                   InlineKeyboardButton("❌ Reject", callback_data=f"rejdep_{dep_id}")]]
-    msg = f"Deposit #{dep_id} by {uid}\nAmount: ₹{amt}"
+    msg = f"Deposit #{dep_id} by {user_id}\nAmount: ₹{amt}"
     if update.message.photo:
         await context.bot.send_photo(ADMIN_ID, file_id, caption=msg, reply_markup=InlineKeyboardMarkup(admin_kbd))
     else:
@@ -366,6 +607,10 @@ async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
 EMAIL_USERNAME, EMAIL_PASSWORD = range(2)
 
 async def email_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if is_maintenance_on() and not is_admin(user_id):
+        await update.message.reply_text("⚠️ Bot is under maintenance.")
+        return ConversationHandler.END
     usr = update.message.text.strip()
     if not re.match(r'^[a-zA-Z0-9._]{6,30}$', usr):
         await update.message.reply_text("Invalid username (6-30 chars)."); return EMAIL_USERNAME
@@ -374,6 +619,10 @@ async def email_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return EMAIL_PASSWORD
 
 async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if is_maintenance_on() and not is_admin(user_id):
+        await update.message.reply_text("⚠️ Bot is under maintenance.")
+        return ConversationHandler.END
     pwd = update.message.text.strip()
     if len(pwd) < 8:
         await update.message.reply_text("Too short (min 8)."); return EMAIL_PASSWORD
@@ -415,6 +664,18 @@ async def run_creation(bot, chat_id, msg_id, uid, email, pwd):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Admin conversation
+    admin_conv = ConversationHandler(
+        entry_points=[CommandHandler("admin", admin_command)],
+        states={
+            ADMIN_MAIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_password)],
+            ADMIN_UPLOAD_VIDEO: [MessageHandler(filters.VIDEO | filters.PHOTO, admin_upload_video)],
+            ADMIN_UPLOAD_QR: [MessageHandler(filters.PHOTO, admin_upload_qr)],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)]
+    )
+
+    # Deposit conversation
     dep_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^deposit$")],
         states={
@@ -423,6 +684,8 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
     )
+
+    # Email creation conversation
     email_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^email_create$")],
         states={
@@ -433,9 +696,10 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(admin_conv)
     app.add_handler(dep_conv)
     app.add_handler(email_conv)
-    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(login|wallet|main_menu|appdep_|rejdep_).*"))
+    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(login|wallet|main_menu|appdep_|rejdep_|admin_).*"))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data))
     app.run_polling()
 
