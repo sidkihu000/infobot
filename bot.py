@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS email_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER, desired_email TEXT, password TEXT,
     status TEXT DEFAULT 'processing',
-    cost REAL DEFAULT 30.0,          -- <--- cost changed to 30
+    cost REAL DEFAULT 30.0,          -- <--- UPDATED to 30
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS bot_config (
@@ -713,7 +713,7 @@ async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return EMAIL_PASSWORD
     uid = update.effective_user.id
     desired = context.user_data["desired_email"]
-    cost = 30.0   # <--- updated cost to ₹30
+    cost = 30.0   # <--- UPDATED to 30
 
     user = DB.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
     if not user:
