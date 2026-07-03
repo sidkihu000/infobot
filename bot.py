@@ -122,33 +122,53 @@ async def get_services(country: str) -> dict:
         return result
     raise Exception(f"获取服务列表失败: {result}")
 
+# ---------- IMPROVED get_service_id ----------
 async def get_service_id(service_name: str, country: str = "any") -> str:
     cache_key = f"{service_name}_{country}"
     if cache_key in _service_cache:
         return _service_cache[cache_key]
 
-    # If country is "any", try all available countries until we find the service
+    # Build list of countries to try
+    countries_to_try = []
     if country == "any":
-        countries = await get_countries()
-        for country_code in countries.keys():
-            try:
-                services = await get_services(country_code)
-                for sid, name in services.items():
-                    if service_name.lower() in name.lower():
-                        _service_cache[cache_key] = sid
-                        logger.info(f"Found service '{service_name}' in country {country_code} with ID {sid}")
-                        return sid
-            except Exception as e:
-                logger.warning(f"Could not fetch services for {country_code}: {e}")
-                continue
-        raise Exception(f"No country found that offers service: {service_name}")
+        try:
+            countries_dict = await get_countries()
+            countries_to_try = list(countries_dict.keys())
+            logger.info(f"Fetched {len(countries_to_try)} countries from API")
+        except Exception as e:
+            logger.warning(f"Could not fetch countries from API: {e}")
+            # Fallback to common countries
+            countries_to_try = ["us", "in", "gb", "ru", "ua", "pl", "de", "fr", "es", "it"]
     else:
-        services = await get_services(country)
-        for sid, name in services.items():
-            if service_name.lower() in name.lower():
-                _service_cache[cache_key] = sid
-                return sid
-        raise Exception(f"Service {service_name} not found in country {country}")
+        countries_to_try = [country]
+
+    # Multiple service name variants to match
+    service_variants = [service_name.lower(), "gmail", "googlemail"]
+
+    for country_code in countries_to_try:
+        try:
+            services = await get_services(country_code)
+            # services is a dict: id -> name
+            for sid, name in services.items():
+                name_lower = name.lower()
+                for variant in service_variants:
+                    if variant in name_lower:
+                        _service_cache[cache_key] = sid
+                        logger.info(f"✅ Found service '{name}' (ID: {sid}) in country {country_code} (variant: '{variant}')")
+                        return sid
+        except Exception as e:
+            logger.warning(f"Could not fetch services for {country_code}: {e}")
+            continue
+
+    # If we reach here, no service was found.
+    # Log the services from a default country (e.g., US) to help debugging.
+    try:
+        services_us = await get_services("us")
+        logger.info(f"Available services in US: {services_us}")
+    except Exception as e:
+        logger.warning(f"Could not fetch US services for debugging: {e}")
+
+    raise Exception(f"No country found that offers service: {service_name}")
 
 async def buy_number(service: str, max_price: float = 100) -> dict:
     if not service.isdigit():
