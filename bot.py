@@ -21,6 +21,12 @@ WEB_APP_URL = os.getenv("WEB_APP_URL", "")
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ---------- State Definitions ----------
+# Define conversation states globally to prevent reference errors
+DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
+EMAIL_USERNAME, EMAIL_PASSWORD = range(2, 4)
+ADMIN_MAIN, ADMIN_UPLOAD_VIDEO, ADMIN_UPLOAD_QR = range(4, 7)
+
 # ---------- Database ----------
 DB = sqlite3.connect("bot_data.db", check_same_thread=False)
 DB.row_factory = sqlite3.Row
@@ -477,6 +483,37 @@ async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❓ Unknown action.")
     return ConversationHandler.END
 
+# Dedicated handler for starting the deposit conversation
+async def deposit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if is_maintenance_on() and not is_admin(user_id):
+        await query.edit_message_text("⚠️ <b>Bot is under maintenance.</b>", parse_mode="HTML")
+        return ConversationHandler.END
+
+    user = DB.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
+    if not user:
+        await query.answer("🛑 Please Login first!", show_alert=True)
+        return ConversationHandler.END
+        
+    await query.edit_message_text("💵 <b>Enter the amount you wish to deposit (in ₹):</b>", parse_mode="HTML")
+    return DEPOSIT_AMOUNT
+
+# Dedicated handler for starting the email creation conversation
+async def email_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if is_maintenance_on() and not is_admin(user_id):
+        await query.edit_message_text("⚠️ <b>Bot is under maintenance.</b>", parse_mode="HTML")
+        return ConversationHandler.END
+
+    await query.edit_message_text("✉️ <b>Enter desired username</b> (without @gmail.com):", parse_mode="HTML")
+    return EMAIL_USERNAME
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -495,19 +532,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif data == "wallet":
         user = DB.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
-            await query.answer("🛑 Please Login first!", show_alert=True); return
+            await query.answer("🛑 Please Login first!", show_alert=True)
+            return
         kbd = [[InlineKeyboardButton("📥 Deposit Funds", callback_data="deposit")],
                [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")]]
         await query.edit_message_text(f"💳 <b>Wallet Dashboard</b>\n\n💰 <b>Balance:</b> ₹{user['balance']:.2f}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kbd))
-    elif data == "deposit":
-        user = DB.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if not user:
-            await query.answer("🛑 Please Login first!", show_alert=True); return
-        await query.edit_message_text("💵 <b>Enter the amount you wish to deposit (in ₹):</b>", parse_mode="HTML")
-        return DEPOSIT_AMOUNT
-    elif data == "email_create":
-        await query.edit_message_text("✉️ <b>Enter desired username</b> (without @gmail.com):", parse_mode="HTML")
-        return EMAIL_USERNAME
     elif data == "main_menu":
         await query.edit_message_text("🌟 <b>Main Menu:</b> What would you like to do?", parse_mode="HTML", reply_markup=get_main_menu())
     elif data.startswith("appdep_") or data.startswith("rejdep_"):
@@ -539,7 +568,6 @@ async def handle_admin_deposits(query, context, data):
 
 # ---------- Admin Panel ----------
 ADMIN_PASSWORD = "sidhu01"
-ADMIN_MAIN, ADMIN_UPLOAD_VIDEO, ADMIN_UPLOAD_QR = range(10, 13)
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -652,8 +680,6 @@ async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ---------- Deposit Conversation ----------
-DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
-
 async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_maintenance_on() and not is_admin(user_id):
@@ -692,8 +718,6 @@ async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 # ---------- Email Creation Conversation ----------
-EMAIL_USERNAME, EMAIL_PASSWORD = range(2)
-
 async def email_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_maintenance_on() and not is_admin(user_id):
@@ -784,7 +808,7 @@ def main():
     )
 
     dep_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^deposit$")],
+        entry_points=[CallbackQueryHandler(deposit_entry, pattern="^deposit$")],
         states={
             DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, deposit_amount)],
             DEPOSIT_SCREENSHOT: [MessageHandler(filters.PHOTO | filters.TEXT & ~filters.COMMAND, deposit_screenshot)],
@@ -793,7 +817,7 @@ def main():
     )
 
     email_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^email_create$")],
+        entry_points=[CallbackQueryHandler(email_entry, pattern="^email_create$")],
         states={
             EMAIL_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, email_username)],
             EMAIL_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, email_password)],
