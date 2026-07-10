@@ -1,6 +1,11 @@
-import asyncio, logging, os, re, random, sqlite3
+import asyncio
+import logging
+import os
+import re
+import random
+import sqlite3
 from urllib.parse import urlparse
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Any
 import httpx
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
@@ -10,19 +15,22 @@ from telegram.ext import (
     MessageHandler, ConversationHandler, filters, ContextTypes
 )
 
+# ---------- Environment & Logging ----------
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8666876765:AAHuB8fe9F0ewUuj9UiE6tdfvmkTviouNdk")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
 OTP_DOCTOR_API_KEY = os.getenv("OTP_DOCTOR_API_KEY", "iztbgplf1l5fbwsk5fqfsrqqcweaxn2w")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6Lf6U0EtAAAAABLduy-p5ch0aDrvBcFacxnHRKIJ")
 PROXY_URL = os.getenv("PROXY_URL", "8ZdCh8tMpCpgwwPeDPJzddE2mEmpVAjBV1mVwTQ657En")
 WEB_APP_URL = os.getenv("WEB_APP_URL", "")
 
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# ---------- State Definitions ----------
-# Define conversation states globally to prevent reference errors
+# ---------- Conversation States ----------
 DEPOSIT_AMOUNT, DEPOSIT_SCREENSHOT = range(2)
 EMAIL_USERNAME, EMAIL_PASSWORD = range(2, 4)
 ADMIN_MAIN, ADMIN_UPLOAD_VIDEO, ADMIN_UPLOAD_QR = range(4, 7)
@@ -34,20 +42,24 @@ DB.row_factory = sqlite3.Row
 DB.executescript("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
-    username TEXT, first_name TEXT,
+    username TEXT,
+    first_name TEXT,
     balance REAL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS deposits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER, amount REAL,
+    user_id INTEGER,
+    amount REAL,
     screenshot_file_id TEXT,
     status TEXT DEFAULT 'pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS email_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER, desired_email TEXT, password TEXT,
+    user_id INTEGER,
+    desired_email TEXT,
+    password TEXT,
     status TEXT DEFAULT 'processing',
     cost REAL DEFAULT 30.0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -63,51 +75,56 @@ INSERT OR IGNORE INTO bot_config (key, value) VALUES ('qr_file_id', '');
 DB.commit()
 
 # ---------- Config Helpers ----------
-def get_config(key, default=None):
+def get_config(key: str, default=None):
     row = DB.execute("SELECT value FROM bot_config WHERE key=?", (key,)).fetchone()
     return row['value'] if row else default
 
-def set_config(key, value):
+def set_config(key: str, value: str):
     DB.execute("INSERT OR REPLACE INTO bot_config (key, value) VALUES (?,?)", (key, value))
     DB.commit()
 
-def is_maintenance_on():
+def is_maintenance_on() -> bool:
     return get_config('maintenance', '0') == '1'
 
-def get_video_file_id():
+def get_video_file_id() -> str:
     return get_config('video_file_id', '')
 
-def get_qr_file_id():
+def get_qr_file_id() -> str:
     return get_config('qr_file_id', '')
 
-def is_admin(user_id):
+def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
-# ---------- Proxy parser ----------
-def parse_proxy_url(url: str) -> Optional[dict]:
-    if not url: return None
+# ---------- Proxy Parser ----------
+def parse_proxy_url(url: str) -> Optional[Dict[str, str]]:
+    if not url:
+        return None
     try:
         parsed = urlparse(url)
-        if not parsed.hostname: return None
+        if not parsed.hostname:
+            return None
         cfg = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port or 80}"}
-        if parsed.username: cfg["username"] = parsed.username
-        if parsed.password: cfg["password"] = parsed.password
+        if parsed.username:
+            cfg["username"] = parsed.username
+        if parsed.password:
+            cfg["password"] = parsed.password
         return cfg
-    except:
+    except Exception:
         return None
 
-# ---------- OTPDoctor API ----------
+# ---------- OTPDoctor API (Robust) ----------
 OTP_API_BASE = "https://otpdoctor.in/stubs/handler_api.php"
 _service_cache = {}
 
-async def _otp_request(params: dict) -> Union[dict, str]:
+async def _otp_request(params: Dict[str, Any]) -> Union[Dict, str]:
+    """Make a request to OTPDoctor API, returning parsed JSON or raw text."""
     params["api_key"] = OTP_DOCTOR_API_KEY
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(OTP_API_BASE, params=params)
         text = resp.text.strip()
         try:
             return resp.json()
-        except:
+        except ValueError:
             return text
 
 async def get_balance() -> float:
@@ -116,24 +133,22 @@ async def get_balance() -> float:
         return float(result.split(":")[1])
     raise Exception(f"获取余额失败: {result}")
 
-async def get_countries() -> dict:
+async def get_countries() -> Dict[str, str]:
     result = await _otp_request({"action": "getCountries"})
     if isinstance(result, dict):
         return result
     raise Exception(f"获取国家列表失败: {result}")
 
-async def get_services(country: str) -> dict:
+async def get_services(country: str) -> Dict[str, str]:
     """
     Fetch services for a country and return a dict {id: name}.
     Handles both dict and list responses.
     """
     result = await _otp_request({"action": "getServices", "country": country})
-    
     if isinstance(result, dict):
         if "services" in result and isinstance(result["services"], dict):
             return result["services"]
         return result
-    
     elif isinstance(result, list):
         services = {}
         for item in result:
@@ -144,15 +159,15 @@ async def get_services(country: str) -> dict:
                     services[str(sid)] = str(name)
         if services:
             return services
-    
     raise Exception(f"获取服务列表失败: {result}")
 
-# ---------- IMPROVED get_service_id ----------
 async def get_service_id(service_name: str, country: str = "any") -> str:
+    """Find the service ID for a given service name (e.g., 'google') across multiple countries."""
     cache_key = f"{service_name}_{country}"
     if cache_key in _service_cache:
         return _service_cache[cache_key]
 
+    # Priority list of countries
     countries_to_try = ["us", "gb", "in", "ru", "ua", "pl", "de", "fr", "es", "it"]
     if country != "any":
         countries_to_try = [country]
@@ -163,18 +178,11 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
             for c in dynamic_countries:
                 if c not in countries_to_try:
                     countries_to_try.append(c)
-            logger.info(f"Total countries to try: {len(countries_to_try)}")
+            logger.info(f"Will try {len(countries_to_try)} countries")
         except Exception as e:
             logger.warning(f"Could not fetch countries from API: {e}")
 
     service_variants = [service_name.lower(), "gmail", "googlemail"]
-
-    if "us" in countries_to_try:
-        try:
-            us_services = await get_services("us")
-            logger.info(f"US services (sample): {dict(list(us_services.items())[:10])}")
-        except Exception as e:
-            logger.warning(f"Could not fetch US services for debugging: {e}")
 
     for country_code in countries_to_try:
         try:
@@ -197,7 +205,7 @@ async def get_service_id(service_name: str, country: str = "any") -> str:
 
     raise Exception(f"No country found that offers service: {service_name}")
 
-async def buy_number(service: str, max_price: float = 100) -> dict:
+async def buy_number(service: str, max_price: float = 100) -> Dict[str, Any]:
     if not service.isdigit():
         service = await get_service_id(service)
     result = await _otp_request({
@@ -209,7 +217,7 @@ async def buy_number(service: str, max_price: float = 100) -> dict:
         return result
     raise Exception(f"购买号码失败: {result}")
 
-async def get_activation_status(activation_id: str) -> dict:
+async def get_activation_status(activation_id: str) -> Dict[str, Any]:
     result = await _otp_request({
         "action": "getStatus",
         "id": activation_id
@@ -258,93 +266,138 @@ async def cancel_activation(activation_id: str):
     except Exception as e:
         logger.warning(f"取消激活失败（非关键）: {e}")
 
-# ---------- 2Captcha ----------
+# ---------- 2Captcha Integration ----------
 async def solve_captcha(page) -> Optional[str]:
-    if not CAPTCHA_API_KEY: return None
-    url = page.url
-    sitekey = await page.evaluate('''()=>{
-        const ifs=document.querySelectorAll('iframe');
-        for(let f of ifs){const s=f.src;if(s.includes('google.com/recaptcha')){const m=s.match(/[?&]k=([^&]+)/);if(m)return m[1]}}
-        const el=document.querySelector('[data-sitekey]');return el?el.getAttribute('data-sitekey'):null
+    if not CAPTCHA_API_KEY:
+        return None
+
+    # Get sitekey and page URL
+    sitekey = await page.evaluate('''() => {
+        const iframes = document.querySelectorAll('iframe');
+        for (let f of iframes) {
+            const src = f.src;
+            if (src.includes('google.com/recaptcha')) {
+                const match = src.match(/[?&]k=([^&]+)/);
+                if (match) return match[1];
+            }
+        }
+        const el = document.querySelector('[data-sitekey]');
+        return el ? el.getAttribute('data-sitekey') : null;
     }''')
-    if not sitekey: return None
-    async with httpx.AsyncClient(timeout=120) as cl:
-        r = await cl.get("https://2captcha.com/in.php", params={
-            "key": CAPTCHA_API_KEY, "method": "userrecaptcha",
-            "googlekey": sitekey, "pageurl": url, "json": 1
+    if not sitekey:
+        return None
+
+    url = page.url
+    async with httpx.AsyncClient(timeout=120) as client:
+        # Submit CAPTCHA
+        resp = await client.get("https://2captcha.com/in.php", params={
+            "key": CAPTCHA_API_KEY,
+            "method": "userrecaptcha",
+            "googlekey": sitekey,
+            "pageurl": url,
+            "json": 1
         })
-        res = r.json()
-        if res.get("status")!=1: return None
-        task_id = res["request"]
+        data = resp.json()
+        if data.get("status") != 1:
+            return None
+        task_id = data["request"]
+
+        # Poll for result
         for _ in range(30):
             await asyncio.sleep(10)
-            r = await cl.get("https://2captcha.com/res.php", params={
-                "key": CAPTCHA_API_KEY, "action": "get", "id": task_id, "json": 1
+            resp = await client.get("https://2captcha.com/res.php", params={
+                "key": CAPTCHA_API_KEY,
+                "action": "get",
+                "id": task_id,
+                "json": 1
             })
-            data = r.json()
-            if data.get("status")==1:
+            data = resp.json()
+            if data.get("status") == 1:
                 token = data["request"]
-                try:
-                    await page.evaluate(f'''
-                        var ta=document.getElementById('g-recaptcha-response');
-                        if(ta){{ta.value="{token}";ta.dispatchEvent(new Event('change',{{bubbles:true}}))}}
-                        var cb=document.getElementById('g-recaptcha-response').getAttribute('data-callback');
-                        if(cb&&typeof window[cb]==='function'){{window[cb]("{token}")}}
-                    ''')
-                except: pass
+                # Inject token into the page
+                await page.evaluate(f'''
+                    (function() {{
+                        const ta = document.getElementById('g-recaptcha-response');
+                        if (ta) {{
+                            ta.value = "{token}";
+                            ta.dispatchEvent(new Event('change', {{bubbles: true}}));
+                        }}
+                        const cb = document.getElementById('g-recaptcha-response')?.getAttribute('data-callback');
+                        if (cb && typeof window[cb] === 'function') {{
+                            window[cb]("{token}");
+                        }}
+                    }})();
+                ''')
                 return token
-            if data.get("request")=="ERROR_CAPTCHA_UNSOLVABLE": return None
+            if data.get("request") == "ERROR_CAPTCHA_UNSOLVABLE":
+                return None
     return None
 
-# ---------- Gmail Creator ----------
+# ---------- Gmail Creator (Enhanced) ----------
 async def create_gmail_auto(username: str, password: str) -> str:
+    # 1. Get a phone number
     service_id = await get_service_id("google", "any")
-    logger.info(f"Google服务ID: {service_id}")
+    logger.info(f"Google service ID: {service_id}")
     activation = await buy_number(service_id, max_price=100)
     phone = activation["number"]
     activation_id = activation["id"]
-    logger.info(f"购买号码成功: {phone} (激活ID: {activation_id})")
+    logger.info(f"Purchased number: {phone} (activation ID: {activation_id})")
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox","--disable-setuid-sandbox",
-                "--disable-dev-shm-usage","--disable-gpu"
-            ])
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu"
+                ]
+            )
             ctx_opts = {
-                "viewport": {"width":1280,"height":800},
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+                "viewport": {"width": 1280, "height": 800},
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
             proxy = parse_proxy_url(PROXY_URL)
-            if proxy: ctx_opts["proxy"] = proxy
+            if proxy:
+                ctx_opts["proxy"] = proxy
             context = await browser.new_context(**ctx_opts)
             page = await context.new_page()
 
+            # Stealth scripts
             await page.add_init_script("""
-                Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
-                Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
-                Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
-                window.chrome={runtime:{}};
-                const oq=window.navigator.permissions.query;
-                window.navigator.permissions.query=p=>p.name==='notifications'?Promise.resolve({state:Notification.permission}):oq(p);
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+                window.chrome = { runtime: {} };
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (p) => 
+                    p.name === 'notifications' ? Promise.resolve({state: Notification.permission}) : originalQuery(p);
             """)
 
-            await page.goto("https://accounts.google.com/signup/v2/webcreateaccount?flowName=GlifWebSignIn&flowEntry=SignUp",
-                            wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(random.uniform(2,3))
+            await page.goto(
+                "https://accounts.google.com/signup/v2/webcreateaccount?flowName=GlifWebSignIn&flowEntry=SignUp",
+                wait_until="networkidle",
+                timeout=60000
+            )
+            await asyncio.sleep(random.uniform(2, 3))
 
+            # Fill in the form
             await page.fill('input[name="firstName"]', "John")
             await page.fill('input[name="lastName"]', "Doe")
             await page.fill('input[name="Username"]', username)
             await page.fill('input[name="Passwd"]', password)
             await page.fill('input[name="ConfirmPasswd"]', password)
+
+            # Click Next
             await page.click('button:has-text("Next")')
             await page.wait_for_timeout(4000)
 
+            # Handle CAPTCHA if appears
             for _ in range(2):
                 if await page.is_visible('iframe[src*="google.com/recaptcha"]'):
-                    logger.info("Captcha appeared, solving...")
+                    logger.info("CAPTCHA detected, solving...")
                     token = await solve_captcha(page)
                     if token:
                         await page.click('button:has-text("Next")')
@@ -355,28 +408,36 @@ async def create_gmail_auto(username: str, password: str) -> str:
                         continue
                 break
 
+            # Phone number entry
             await page.wait_for_selector('input[type="tel"]', timeout=30000)
             await page.fill('input[type="tel"]', phone)
             await page.click('button:has-text("Next")')
 
-            logger.info("等待SMS...")
+            # Wait for SMS
+            logger.info("Waiting for SMS...")
             code = await get_sms(activation_id)
-            logger.info(f"收到验证码: {code}")
+            logger.info(f"Received verification code: {code}")
+
+            # Enter code
             await page.wait_for_selector('input[type="tel"]', timeout=30000)
             await page.fill('input[type="tel"]', code)
             await page.click('button:has-text("Next")')
 
+            # Final steps: accept terms, skip optional screens
             try:
                 await page.wait_for_selector('button:has-text("I agree")', timeout=5000)
                 await page.click('button:has-text("I agree")')
                 await page.wait_for_timeout(2000)
-            except: pass
+            except:
+                pass
             try:
                 await page.click('button:has-text("Next")', timeout=5000)
                 await page.wait_for_timeout(2000)
-            except: pass
+            except:
+                pass
 
-            await set_status(activation_id, 1)   # 1 = completed
+            # Mark activation as completed
+            await set_status(activation_id, 1)
             await page.wait_for_timeout(4000)
             await browser.close()
 
@@ -395,35 +456,36 @@ def get_main_menu():
         [InlineKeyboardButton("🔐 Secure Login", callback_data="login")],
     ])
 
-async def loading_animation(bot, chat_id, msg_id):
-    """Simple animation task to show progress to the user while waiting."""
-    frames = [
-        "⏳ <b>Initializing...</b> [■□□□□□□□□□]",
-        "⚙️ <b>Connecting...</b> [■■□□□□□□□□]",
-        "🌐 <b>Opening Network...</b> [■■■□□□□□□□]",
-        "🤖 <b>Bypassing Captchas...</b> [■■■■□□□□□□]",
-        "📱 <b>Fetching OTP...</b> [■■■■■□□□□□]",
-        "📞 <b>Waiting for SMS...</b> [■■■■■■□□□□]",
-        "✅ <b>SMS Received!</b> [■■■■■■■□□□]",
-        "📝 <b>Finalizing Details...</b> [■■■■■■■■□□]",
-        "✨ <b>Almost Done...</b> [■■■■■■■■■□]",
-        "🚀 <b>Finishing Up...</b> [■■■■■■■■■■]"
+async def loading_animation(bot, chat_id: int, msg_id: int):
+    """Animate a progress bar with descriptive steps."""
+    steps = [
+        ("⏳ Initializing...", "■□□□□□□□□□"),
+        ("⚙️ Connecting...", "■■□□□□□□□□"),
+        ("🌐 Opening Network...", "■■■□□□□□□□"),
+        ("🤖 Bypassing Captchas...", "■■■■□□□□□□"),
+        ("📱 Fetching OTP...", "■■■■■□□□□□"),
+        ("📞 Waiting for SMS...", "■■■■■■□□□□"),
+        ("✅ SMS Received!", "■■■■■■■□□□"),
+        ("📝 Finalizing Details...", "■■■■■■■■□□"),
+        ("✨ Almost Done...", "■■■■■■■■■□"),
+        ("🚀 Finishing Up...", "■■■■■■■■■■")
     ]
     try:
         while True:
-            for frame in frames:
+            for label, bar in steps:
                 await bot.edit_message_text(
-                    chat_id=chat_id, 
-                    message_id=msg_id, 
-                    text=f"<b>✨ Automated Gmail Creator ✨</b>\n\n{frame}\n\n<i>Please be patient, this takes about 1-2 minutes.</i>", 
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=f"<b>✨ Automated Gmail Creator ✨</b>\n\n{label} [{bar}]\n\n<i>Please be patient, this takes 1‑2 minutes.</i>",
                     parse_mode="HTML"
                 )
                 await asyncio.sleep(2.5)
     except asyncio.CancelledError:
         pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Animation error: {e}")
 
+# ---------- Command Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if is_maintenance_on() and not is_admin(user_id):
@@ -436,6 +498,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_video(video_id, caption="🎥 <b>Welcome to Gmail Creator Bot!</b>", parse_mode="HTML")
         except:
             await update.message.reply_photo(video_id, caption="📸 <b>Welcome to Gmail Creator Bot!</b>", parse_mode="HTML")
+
     qr_id = get_qr_file_id()
     if qr_id:
         try:
@@ -453,10 +516,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if WEB_APP_URL:
         buttons.append([InlineKeyboardButton("🚀 Open Web Creator", web_app=WebAppInfo(url=WEB_APP_URL))])
     buttons.extend(get_main_menu().inline_keyboard)
-    
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle data sent from the web app."""
     user_id = update.effective_user.id
     if is_maintenance_on() and not is_admin(user_id):
         await update.message.reply_text("⚠️ <b>Bot is under maintenance.</b>", parse_mode="HTML")
@@ -475,7 +538,7 @@ async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_contact":
         await update.message.reply_text("👨‍💻 <b>Contact admin:</b> @Xricx0", parse_mode="HTML")
     elif data == "login":
-        DB.execute("INSERT OR IGNORE INTO users (user_id,username,first_name) VALUES (?,?,?)",
+        DB.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)",
                    (user_id, update.effective_user.username, update.effective_user.first_name))
         DB.commit()
         await update.message.reply_text("✅ <b>Successfully Logged in!</b>", parse_mode="HTML")
@@ -483,38 +546,8 @@ async def web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❓ Unknown action.")
     return ConversationHandler.END
 
-# Dedicated handler for starting the deposit conversation
-async def deposit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    if is_maintenance_on() and not is_admin(user_id):
-        await query.edit_message_text("⚠️ <b>Bot is under maintenance.</b>", parse_mode="HTML")
-        return ConversationHandler.END
-
-    user = DB.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
-    if not user:
-        await query.answer("🛑 Please Login first!", show_alert=True)
-        return ConversationHandler.END
-        
-    await query.edit_message_text("💵 <b>Enter the amount you wish to deposit (in ₹):</b>", parse_mode="HTML")
-    return DEPOSIT_AMOUNT
-
-# Dedicated handler for starting the email creation conversation
-async def email_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    if is_maintenance_on() and not is_admin(user_id):
-        await query.edit_message_text("⚠️ <b>Bot is under maintenance.</b>", parse_mode="HTML")
-        return ConversationHandler.END
-
-    await query.edit_message_text("✉️ <b>Enter desired username</b> (without @gmail.com):", parse_mode="HTML")
-    return EMAIL_USERNAME
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+# ---------- Callback Query Handler ----------
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -525,7 +558,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if data == "login":
-        DB.execute("INSERT OR IGNORE INTO users (user_id,username,first_name) VALUES (?,?,?)",
+        DB.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?,?,?)",
                    (user_id, query.from_user.username, query.from_user.first_name))
         DB.commit()
         await query.edit_message_text("✅ <b>Successfully Logged in!</b> Ready to use.", parse_mode="HTML", reply_markup=get_main_menu())
@@ -544,10 +577,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif data.startswith("admin_"):
         await handle_admin_callbacks(query, context, data)
 
-# ---------- Admin deposit handling ----------
-async def handle_admin_deposits(query, context, data):
+# ---------- Admin Deposit Handling ----------
+async def handle_admin_deposits(query, context, data: str):
     if not is_admin(query.from_user.id):
-        await query.answer("🛑 Unauthorized", show_alert=True); return
+        await query.answer("🛑 Unauthorized", show_alert=True)
+        return
     action, dep_id = data.split("_")
     dep_id = int(dep_id)
     dep = DB.execute("SELECT * FROM deposits WHERE id=?", (dep_id,)).fetchone()
@@ -610,10 +644,11 @@ async def admin_panel_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await query.edit_message_text("👑 <b>Admin Control Panel</b>", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
-async def handle_admin_callbacks(query: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
+async def handle_admin_callbacks(query, context, data: str):
     user_id = query.from_user.id
     if not is_admin(user_id):
-        await query.answer("Unauthorized", show_alert=True); return
+        await query.answer("Unauthorized", show_alert=True)
+        return
 
     if data == "admin_toggle":
         current = is_maintenance_on()
@@ -688,7 +723,8 @@ async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amt = float(update.message.text)
     except:
-        await update.message.reply_text("⚠️ <b>Invalid number.</b> Please enter numbers only.", parse_mode="HTML"); return DEPOSIT_AMOUNT
+        await update.message.reply_text("⚠️ <b>Invalid number.</b> Please enter numbers only.", parse_mode="HTML")
+        return DEPOSIT_AMOUNT
     context.user_data["deposit_amount"] = amt
     if os.path.exists("qr_code.jpg"):
         with open("qr_code.jpg", "rb") as f:
@@ -702,9 +738,9 @@ async def deposit_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if is_maintenance_on() and not is_admin(user_id):
         await update.message.reply_text("⚠️ Bot is under maintenance.")
         return ConversationHandler.END
-    amt = context.user_data.get("deposit_amount",0)
+    amt = context.user_data.get("deposit_amount", 0)
     file_id = update.message.photo[-1].file_id if update.message.photo else update.message.text
-    cur = DB.execute("INSERT INTO deposits (user_id,amount,screenshot_file_id) VALUES (?,?,?)", (user_id,amt,file_id))
+    cur = DB.execute("INSERT INTO deposits (user_id, amount, screenshot_file_id) VALUES (?,?,?)", (user_id, amt, file_id))
     dep_id = cur.lastrowid
     DB.commit()
     admin_kbd = [[InlineKeyboardButton("✅ Approve", callback_data=f"appdep_{dep_id}"),
@@ -725,7 +761,8 @@ async def email_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     usr = update.message.text.strip()
     if not re.match(r'^[a-zA-Z0-9._]{6,30}$', usr):
-        await update.message.reply_text("⚠️ <b>Invalid username!</b> Must be 6-30 characters long (letters, numbers, dots).", parse_mode="HTML"); return EMAIL_USERNAME
+        await update.message.reply_text("⚠️ <b>Invalid username!</b> Must be 6-30 characters long (letters, numbers, dots).", parse_mode="HTML")
+        return EMAIL_USERNAME
     context.user_data["desired_email"] = usr
     await update.message.reply_text("🔑 <b>Enter a strong password</b> (minimum 8 characters):", parse_mode="HTML")
     return EMAIL_PASSWORD
@@ -737,37 +774,43 @@ async def email_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     pwd = update.message.text.strip()
     if len(pwd) < 8:
-        await update.message.reply_text("⚠️ <b>Password too short!</b> Minimum 8 characters required.", parse_mode="HTML"); return EMAIL_PASSWORD
+        await update.message.reply_text("⚠️ <b>Password too short!</b> Minimum 8 characters required.", parse_mode="HTML")
+        return EMAIL_PASSWORD
+
     uid = update.effective_user.id
     desired = context.user_data["desired_email"]
     cost = 30.0
 
     user = DB.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
     if not user:
-        await update.message.reply_text("🛑 <b>Please login first.</b>", parse_mode="HTML", reply_markup=get_main_menu()); return ConversationHandler.END
+        await update.message.reply_text("🛑 <b>Please login first.</b>", parse_mode="HTML", reply_markup=get_main_menu())
+        return ConversationHandler.END
     if user["balance"] < cost:
-        await update.message.reply_text(f"❌ <b>Insufficient balance!</b>\n\nYou need ₹{cost} to create a Gmail account. Please deposit funds via Wallet.", parse_mode="HTML", reply_markup=get_main_menu()); return ConversationHandler.END
+        await update.message.reply_text(f"❌ <b>Insufficient balance!</b>\n\nYou need ₹{cost} to create a Gmail account. Please deposit funds via Wallet.", parse_mode="HTML", reply_markup=get_main_menu())
+        return ConversationHandler.END
 
+    # Deduct balance
     DB.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (cost, uid))
-    DB.execute("INSERT INTO email_orders (user_id,desired_email,password,cost) VALUES (?,?,?,?)",
+    DB.execute("INSERT INTO email_orders (user_id, desired_email, password, cost) VALUES (?,?,?,?)",
                (uid, desired, pwd, cost))
     DB.commit()
 
     msg = await update.message.reply_text("⏳ <b>Initializing Gmail Creator...</b>\n\n<i>Starting engines...</i>", parse_mode="HTML")
+
+    # Start creation in background
     asyncio.create_task(run_creation(context.bot, update.effective_chat.id, msg.message_id, uid, desired, pwd))
     return ConversationHandler.END
 
-async def run_creation(bot, chat_id, msg_id, uid, email, pwd):
-    # Start the visual loading animation task
+async def run_creation(bot, chat_id: int, msg_id: int, uid: int, email: str, pwd: str):
+    """Background task that creates the Gmail account with animation."""
     anim_task = asyncio.create_task(loading_animation(bot, chat_id, msg_id))
-    
     try:
         creds = await create_gmail_auto(email, pwd)
-        # Cancel animation once process succeeds
         anim_task.cancel()
-        
+
         DB.execute("UPDATE email_orders SET status='completed' WHERE desired_email=? AND user_id=?", (email, uid))
         DB.commit()
+
         success_text = (
             "🎉 <b>ACCOUNT CREATED SUCCESSFULLY!</b> 🎉\n\n"
             "📧 <b>Email:</b> <code>{}</code>\n"
@@ -775,17 +818,16 @@ async def run_creation(bot, chat_id, msg_id, uid, email, pwd):
             "<i>Please save your credentials securely!</i>"
         ).format(creds.split(":")[0], creds.split(":")[1])
         await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=success_text, parse_mode="HTML")
-        
+
     except Exception as e:
-        # Cancel animation once process fails
         anim_task.cancel()
         logger.exception("Auto creation failed")
-        
-        # Refund exactly ₹30
+
+        # Refund the user
         DB.execute("UPDATE users SET balance = balance + 30 WHERE user_id=?", (uid,))
         DB.execute("UPDATE email_orders SET status='failed' WHERE desired_email=? AND user_id=?", (email, uid))
         DB.commit()
-        
+
         fail_text = (
             "❌ <b>Creation Failed!</b>\n\n"
             f"<i>Reason:</i> {str(e)[:150]}...\n\n"
@@ -793,10 +835,11 @@ async def run_creation(bot, chat_id, msg_id, uid, email, pwd):
         )
         await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=fail_text, parse_mode="HTML")
 
-# ---------- Main ----------
+# ---------- Main Application ----------
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Conversation: Admin
     admin_conv = ConversationHandler(
         entry_points=[CommandHandler("admin", admin_command)],
         states={
@@ -807,22 +850,24 @@ def main():
         fallbacks=[CommandHandler("cancel", admin_cancel)]
     )
 
+    # Conversation: Deposit
     dep_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(deposit_entry, pattern="^deposit$")],
+        entry_points=[CallbackQueryHandler(lambda u, c: DEPOSIT_AMOUNT, pattern="^deposit$")],
         states={
             DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, deposit_amount)],
             DEPOSIT_SCREENSHOT: [MessageHandler(filters.PHOTO | filters.TEXT & ~filters.COMMAND, deposit_screenshot)],
         },
-        fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
     )
 
+    # Conversation: Email creation
     email_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(email_entry, pattern="^email_create$")],
+        entry_points=[CallbackQueryHandler(lambda u, c: EMAIL_USERNAME, pattern="^email_create$")],
         states={
             EMAIL_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, email_username)],
             EMAIL_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, email_password)],
         },
-        fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)]
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
     )
 
     app.add_handler(CommandHandler("start", start))
@@ -831,6 +876,7 @@ def main():
     app.add_handler(email_conv)
     app.add_handler(CallbackQueryHandler(button_handler, pattern="^(login|wallet|main_menu|appdep_|rejdep_|admin_).*"))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data))
+
     app.run_polling()
 
 if __name__ == "__main__":
