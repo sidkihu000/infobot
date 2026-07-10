@@ -11,7 +11,7 @@ from telegram.ext import (
 )
 
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN", "6067177575:AAEUVOteOiERUHE5v75iudEdHAGiCRXBGus")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "6067177575:AAHxy0-LyrrrpDCb7VzHynn3KBN6cA6QtWo")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "2119464081"))
 OTP_DOCTOR_API_KEY = os.getenv("OTP_DOCTOR_API_KEY", "iztbgplf1l5fbwsk5fqfsrqqcweaxn2w")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "6Lf6U0EtAAAAABLduy-p5ch0aDrvBcFacxnHRKIJ")
